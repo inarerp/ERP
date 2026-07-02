@@ -1357,137 +1357,177 @@ function Dashboard({ navigateSub, navigate }) {
   );
 }
 
-// ── Party Profile ──
-// شاشة موحدة تجمع كل معلومات الطرف بغض النظر عن أدواره
+// ── Party Profile — Version 2 ──
 function PartyProfile({ partyId, onBack, navigateSub }) {
-  const [party,   setParty]   = useState(null);
-  const [roles,   setRoles]   = useState([]);
-  const [inv,     setInv]     = useState(null);
-  const [entity,  setEntity]  = useState(null);
-  const [broker,  setBroker]  = useState(null);
-  const [client,  setClient]  = useState(null);
-  const [invDeals,setInvDeals]= useState([]);
-  const [entDeals,setEntDeals]= useState([]);
-  const [brkDeals,setBrkDeals]= useState([]);
-  const [cliDeals,setCliDeals]= useState([]);
-  const [invLedger,setInvLedger]=useState([]);
-  const [timeline,setTimeline]=useState([]);
-  const [tlFilter,setTlFilter]=useState('all');
-  const [sections,setSections]=useState({financial:true,deals:true,timeline:true});
-  const [loading, setLoading] = useState(true);
-  const [editModal,setEditModal]=useState(false);
-  const [editForm, setEditForm]=useState({});
-  const [saving,   setSaving]  =useState(false);
+  const [party,    setParty]    = useState(null);
+  const [roles,    setRoles]    = useState([]);
+  const [inv,      setInv]      = useState(null);
+  const [entity,   setEntity]   = useState(null);
+  const [broker,   setBroker]   = useState(null);
+  const [client,   setClient]   = useState(null);
+  const [invDeals, setInvDeals] = useState([]);
+  const [entDeals, setEntDeals] = useState([]);
+  const [brkDeals, setBrkDeals] = useState([]);
+  const [cliDeals, setCliDeals] = useState([]);
+  const [invLedger,setInvLedger]= useState([]);
+  const [tlFilter, setTlFilter] = useState('all');
+  const [sections, setSections] = useState({ roles:true, financial:true, deals:true, timeline:true });
+  const [loading,  setLoading]  = useState(true);
 
-  useEffect(()=>{
-    async function load(){
-      const {data:p} = await sb.from('parties').select('*').eq('id',partyId).single();
-      if(!p) return;
-      setParty(p);
-      setEditForm({name:p.name,phone:p.phone||'',email:p.email||'',address:p.address||'',notes:p.notes||''});
+  // Edit modal
+  const [editModal, setEditModal] = useState(false);
+  const [editForm,  setEditForm]  = useState({});
+  const [saving,    setSaving]    = useState(false);
 
-      const {data:r} = await sb.from('party_roles').select('*').eq('party_id',partyId).eq('is_active',true);
-      const activeRoles = r||[];
-      setRoles(activeRoles);
+  // Add Role modal
+  const [addRoleModal, setAddRoleModal]  = useState(false);
+  const [addRoleType,  setAddRoleType]   = useState('');
+  const [addRoleExtra, setAddRoleExtra]  = useState({ funding_capacity:'', commission_rate:'' });
+  const [addRoleSaving,setAddRoleSaving] = useState(false);
 
-      const invRole = activeRoles.find(x=>x.role==='investor');
-      const entRole = activeRoles.find(x=>x.role==='entity');
-      const brkRole = activeRoles.find(x=>x.role==='broker');
-      const cliRole = activeRoles.find(x=>x.role==='client');
+  const roleColors = { investor:'role-investor', entity:'role-entity', broker:'role-broker', client:'role-client', supplier:'role-other' };
+  const roleLabels = { investor:'ممول', entity:'كيان', broker:'وسيط', client:'عميل', supplier:'مورد' };
 
-      await Promise.all([
-        invRole && sb.from('investors').select('*').eq('id',invRole.source_record_id).single().then(({data})=>{
-          setInv(data);
-          return Promise.all([
-            sb.from('deal_investors').select('*, deals(id,deal_number,name,status,value)').eq('investor_id',invRole.source_record_id).then(({data:d})=>setInvDeals(d||[])),
-            sb.from('investor_ledger').select('*').eq('investor_id',invRole.source_record_id).order('created_at',{ascending:false}).limit(20).then(({data:d})=>setInvLedger(d||[])),
-          ]);
-        }),
-        entRole && sb.from('entities').select('*').eq('id',entRole.source_record_id).single().then(({data})=>{
-          setEntity(data);
-          return sb.from('deals').select('id,deal_number,name,status,value,created_at').eq('entity_id',entRole.source_record_id).order('created_at',{ascending:false}).limit(20).then(({data:d})=>setEntDeals(d||[]));
-        }),
-        brkRole && sb.from('brokers').select('*').eq('id',brkRole.source_record_id).single().then(({data})=>{
-          setBroker(data);
-          return sb.from('deal_brokers').select('*, deals(id,deal_number,name,status,value)').eq('broker_id',brkRole.source_record_id).then(({data:d})=>setBrkDeals(d||[]));
-        }),
-        cliRole && sb.from('clients').select('*').eq('id',cliRole.source_record_id).single().then(({data})=>{
-          setClient(data);
-          return sb.from('deals').select('id,deal_number,name,status,value,created_at').eq('client_id',cliRole.source_record_id).order('created_at',{ascending:false}).limit(20).then(({data:d})=>setCliDeals(d||[]));
-        }),
-      ].filter(Boolean));
-      setLoading(false);
-    }
-    load();
-  },[partyId]);
+  const load = useCallback(async () => {
+    const { data: p } = await sb.from('parties').select('*').eq('id', partyId).single();
+    if (!p) return;
+    setParty(p);
+    setEditForm({ name:p.name, phone:p.phone||'', email:p.email||'', address:p.address||'', notes:p.notes||'' });
 
-  // بناء Timeline موحدة من كل المصادر
+    const { data: r } = await sb.from('party_roles').select('*').eq('party_id', partyId).order('created_at');
+    const allRoles = r || [];
+    setRoles(allRoles);
+    const activeRoles = allRoles.filter(x => x.is_active);
+
+    const invRole = activeRoles.find(x => x.role === 'investor');
+    const entRole = activeRoles.find(x => x.role === 'entity');
+    const brkRole = activeRoles.find(x => x.role === 'broker');
+    const cliRole = activeRoles.find(x => x.role === 'client');
+
+    await Promise.all([
+      invRole && sb.from('investors').select('*').eq('id', invRole.source_record_id).single().then(({ data }) => {
+        setInv(data);
+        return Promise.all([
+          sb.from('deal_investors').select('*, deals(id,deal_number,name,status,value)').eq('investor_id', invRole.source_record_id).then(({ data: d }) => setInvDeals(d||[])),
+          sb.from('investor_ledger').select('*').eq('investor_id', invRole.source_record_id).order('created_at',{ascending:false}).limit(30).then(({ data: d }) => setInvLedger(d||[])),
+        ]);
+      }),
+      entRole && sb.from('entities').select('*').eq('id', entRole.source_record_id).single().then(({ data }) => {
+        setEntity(data);
+        return sb.from('deals').select('id,deal_number,name,status,value,created_at').eq('entity_id', entRole.source_record_id).order('created_at',{ascending:false}).limit(20).then(({ data: d }) => setEntDeals(d||[]));
+      }),
+      brkRole && sb.from('brokers').select('*').eq('id', brkRole.source_record_id).single().then(({ data }) => {
+        setBroker(data);
+        return sb.from('deal_brokers').select('*, deals(id,deal_number,name,status,value)').eq('broker_id', brkRole.source_record_id).then(({ data: d }) => setBrkDeals(d||[]));
+      }),
+      cliRole && sb.from('clients').select('*').eq('id', cliRole.source_record_id).single().then(({ data }) => {
+        setClient(data);
+        return sb.from('deals').select('id,deal_number,name,status,value,created_at').eq('client_id', cliRole.source_record_id).order('created_at',{ascending:false}).limit(20).then(({ data: d }) => setCliDeals(d||[]));
+      }),
+    ].filter(Boolean));
+
+    setLoading(false);
+  }, [partyId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // ── Timeline موحدة ──
   const buildTimeline = () => {
     const items = [];
-    invLedger.forEach(l=>items.push({
+    invLedger.forEach(l => items.push({
       id:'il'+l.id, date:l.created_at, role:'investor',
-      icon:'💰', title:l.movement_type==='deposit'?'إيداع':l.movement_type==='allocation'?'تخصيص لعملية':l.movement_type==='capital_return'?'إرجاع رأس مال':'حركة ممول',
-      sub: l.notes||'', amount: l.amount, dir: ['deposit','capital_return'].includes(l.movement_type)?'in':'out',
+      icon:'💰',
+      title: { deposit:'إيداع', allocation:'تخصيص لعملية', capital_return:'إرجاع رأس مال', capital_withdrawal:'سحب' }[l.movement_type] || l.movement_type,
+      sub: l.notes||'', amount: l.amount,
+      dir: ['deposit','capital_return'].includes(l.movement_type) ? 'in' : 'out',
     }));
-    invDeals.forEach(di=>items.push({
-      id:'di'+di.id, date:di.created_at||di.deals?.created_at, role:'investor',
-      icon:'📋', title:`تخصيص في عملية: ${di.deals?.deal_number||''}`,
-      sub: di.deals?.name||'', amount: di.amount, dir:'out',
+    invDeals.forEach(di => items.push({
+      id:'di'+di.id, date: di.created_at, role:'investor',
+      icon:'📋', title:`تخصيص: ${di.deals?.deal_number||''} — ${di.deals?.name||''}`,
+      sub: (STATUS_MAP[di.deals?.status]||{label:di.deals?.status}).label, amount: di.amount, dir:'out',
     }));
-    entDeals.forEach(d=>items.push({
-      id:'ed'+d.id, date:d.created_at, role:'entity',
+    entDeals.forEach(d => items.push({
+      id:'ed'+d.id, date: d.created_at, role:'entity',
       icon:'🏢', title:`عملية: ${d.deal_number} — ${d.name}`,
-      sub: (STATUS_MAP[d.status]||{label:d.status}).label, amount:d.value, dir:'in',
+      sub: (STATUS_MAP[d.status]||{label:d.status}).label, amount: d.value, dir:'in',
     }));
-    brkDeals.forEach(d=>items.push({
-      id:'bd'+d.id, date:d.created_at||d.deals?.created_at, role:'broker',
-      icon:'🤝', title:`وساطة: ${d.deals?.deal_number||''}`,
-      sub: d.deals?.name||'', amount:d.commission_due, dir:'in',
+    brkDeals.forEach(d => items.push({
+      id:'bd'+d.id, date: d.created_at||d.deals?.created_at, role:'broker',
+      icon:'🤝', title:`وساطة: ${d.deals?.deal_number||''} — ${d.deals?.name||''}`,
+      sub: '', amount: d.commission_due, dir:'in',
     }));
-    cliDeals.forEach(d=>items.push({
-      id:'cd'+d.id, date:d.created_at, role:'client',
+    cliDeals.forEach(d => items.push({
+      id:'cd'+d.id, date: d.created_at, role:'client',
       icon:'🛒', title:`توريد: ${d.deal_number} — ${d.name}`,
-      sub: (STATUS_MAP[d.status]||{label:d.status}).label, amount:d.value, dir:'out',
+      sub: (STATUS_MAP[d.status]||{label:d.status}).label, amount: d.value, dir:'out',
     }));
-    items.sort((a,b)=>new Date(b.date)-new Date(a.date));
-    if(tlFilter==='all') return items;
-    return items.filter(x=>x.role===tlFilter||x.role===undefined);
+    items.sort((a,b) => new Date(b.date) - new Date(a.date));
+    return tlFilter==='all' ? items : items.filter(x => x.role===tlFilter);
   };
 
+  // ── حفظ تعديل البيانات الأساسية ──
   const saveEdit = async () => {
+    if (!editForm.name.trim()) return;
     setSaving(true);
     try {
       await sb.from('parties').update({
         name: editForm.name.trim(), phone: editForm.phone||null,
         email: editForm.email||null, address: editForm.address||null, notes: editForm.notes||null,
-      }).eq('id',partyId);
+      }).eq('id', partyId);
       // مزامنة الاسم في الجداول الأصلية
-      const invRole = roles.find(x=>x.role==='investor');
-      const entRole = roles.find(x=>x.role==='entity');
-      const brkRole = roles.find(x=>x.role==='broker');
-      const cliRole = roles.find(x=>x.role==='client');
-      await Promise.all([
-        invRole && sb.from('investors').update({name:editForm.name.trim()}).eq('id',invRole.source_record_id),
-        entRole && sb.from('entities').update({name:editForm.name.trim()}).eq('id',entRole.source_record_id),
-        brkRole && sb.from('brokers').update({name:editForm.name.trim()}).eq('id',brkRole.source_record_id),
-        cliRole && sb.from('clients').update({name:editForm.name.trim()}).eq('id',cliRole.source_record_id),
-      ].filter(Boolean));
-      setParty(p=>({...p,...editForm}));
+      const activeRoles = roles.filter(x => x.is_active);
+      await Promise.all(activeRoles.map(r => {
+        if (r.role==='investor') return sb.from('investors').update({name:editForm.name.trim(),phone:editForm.phone||null,email:editForm.email||null}).eq('id',r.source_record_id);
+        if (r.role==='entity')   return sb.from('entities').update({name:editForm.name.trim()}).eq('id',r.source_record_id);
+        if (r.role==='broker')   return sb.from('brokers').update({name:editForm.name.trim(),phone:editForm.phone||null,email:editForm.email||null}).eq('id',r.source_record_id);
+        if (r.role==='client')   return sb.from('clients').update({name:editForm.name.trim(),phone:editForm.phone||null,email:editForm.email||null}).eq('id',r.source_record_id);
+        return Promise.resolve();
+      }));
       setEditModal(false);
-    } catch(err){ showError(err,'تعديل بيانات الطرف'); }
-    finally{ setSaving(false); }
+      await load();
+    } catch(err) { showError(err, 'تعديل بيانات الطرف'); }
+    finally { setSaving(false); }
   };
 
-  const toggleSection = k => setSections(s=>({...s,[k]:!s[k]}));
+  // ── إضافة دور جديد ──
+  const saveAddRole = async () => {
+    if (!addRoleType) return;
+    setAddRoleSaving(true);
+    try {
+      const name = party.name;
+      if (addRoleType==='investor') await callRpc('create_investor_atomic', { p_name:name, p_phone:party.phone||null, p_email:party.email||null, p_funding_capacity:Number(addRoleExtra.funding_capacity)||0, p_notes:null });
+      if (addRoleType==='entity')   await callRpc('create_entity_atomic',   { p_name:name, p_type:'company', p_notes:null });
+      if (addRoleType==='broker')   await callRpc('create_broker_atomic',   { p_name:name, p_phone:party.phone||null, p_email:party.email||null, p_notes:null });
+      if (addRoleType==='client')   await callRpc('create_client_atomic',   { p_name:name, p_contact_name:null, p_phone:party.phone||null, p_email:party.email||null, p_address:party.address||null, p_notes:null });
+      setAddRoleModal(false); setAddRoleType(''); setAddRoleExtra({ funding_capacity:'', commission_rate:'' });
+      await load();
+    } catch(err) { showError(err, 'إضافة دور'); }
+    finally { setAddRoleSaving(false); }
+  };
 
-  const roleColors = {investor:'role-investor',entity:'role-entity',broker:'role-broker',client:'role-client'};
-  const roleLabels = {investor:'ممول',entity:'كيان',broker:'وسيط',client:'عميل'};
+  // ── تعطيل / تفعيل دور ──
+  const toggleRole = async (roleId, currentActive) => {
+    try {
+      await sb.from('party_roles').update({ is_active: !currentActive }).eq('id', roleId);
+      await load();
+    } catch(err) { showError(err, 'تعديل الدور'); }
+  };
 
-  if(loading) return <Loading/>;
-  if(!party)  return <div style={{padding:24,color:'var(--red)'}}>الطرف غير موجود</div>;
+  const toggleSection = k => setSections(s => ({...s, [k]:!s[k]}));
 
+  if (loading) return <Loading/>;
+  if (!party)  return <div style={{padding:24,color:'var(--red)'}}>الطرف غير موجود</div>;
+
+  const activeRoles = roles.filter(r => r.is_active);
+  const existingActiveRoles = activeRoles.map(r => r.role);
+  const availableRoles = ['investor','entity','broker','client'].filter(r => !existingActiveRoles.includes(r));
   const tl = buildTimeline();
   const initials = (party.name||'؟').trim().slice(0,2);
+
+  // ── إحصائيات سريعة للـ header ──
+  const totalDeals = invDeals.length + entDeals.length + brkDeals.length + cliDeals.length;
+  const lastActivity = [...invLedger.map(x=>x.created_at), ...entDeals.map(x=>x.created_at), ...cliDeals.map(x=>x.created_at)]
+    .filter(Boolean).sort().reverse()[0];
 
   return (
     <div>
@@ -1498,99 +1538,179 @@ function PartyProfile({ partyId, onBack, navigateSub }) {
         <span className="breadcrumb-item active">{party.name}</span>
       </div>
 
-      {/* Party Header */}
+      {/* ── Party Header ── */}
       <div className="party-header">
         <div className="party-avatar">{initials}</div>
         <div style={{flex:1,minWidth:0}}>
           <div className="party-name">{party.name}</div>
           <div className="party-meta">
-            {party.phone && <span>📞 {party.phone}</span>}
-            {party.email && <span>✉️ {party.email}</span>}
+            {party.phone   && <span>📞 {party.phone}</span>}
+            {party.email   && <span>✉️ {party.email}</span>}
             {party.address && <span>📍 {party.address}</span>}
-            <span style={{color:'var(--text3)'}}>
-              {party.type==='person'?'👤 شخص طبيعي':'🏢 شركة'}
-            </span>
+            <span style={{color:'var(--text3)'}}>{party.type==='person'?'👤 شخص طبيعي':'🏢 شركة'}</span>
+            {lastActivity && <span style={{color:'var(--text3)'}}>آخر نشاط: {new Date(lastActivity).toLocaleDateString('ar-EG')}</span>}
           </div>
-          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-            {roles.map(r=>(
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:4}}>
+            {activeRoles.map(r => (
               <span key={r.id} className={`role-pill ${roleColors[r.role]||'role-other'}`}>
                 {roleLabels[r.role]||r.role}
               </span>
             ))}
           </div>
         </div>
-        <button className="topbar-btn" style={{background:'var(--bg3)',color:'var(--text)',flexShrink:0}} onClick={()=>setEditModal(true)}>
-          <Icon d={Icons.edit}/> تعديل
-        </button>
+        <div style={{display:'flex',gap:8,flexShrink:0,flexWrap:'wrap',justifyContent:'flex-end'}}>
+          <button className="topbar-btn" style={{background:'var(--bg3)',color:'var(--text)'}} onClick={()=>setEditModal(true)}>
+            <Icon d={Icons.edit}/> تعديل
+          </button>
+        </div>
       </div>
 
-      {/* Summary Cards */}
-      {(inv||entity||broker||client) && (
-        <div style={{padding:'16px 20px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10,borderBottom:'1px solid var(--border)'}}>
-          {inv && <>
-            <div className="stat-card"><div className="stat-label">رصيد متاح</div><div className="stat-value green">{fmt(inv.available_balance)}</div></div>
-            <div className="stat-card"><div className="stat-label">رصيد عامل</div><div className="stat-value blue">{fmt(inv.working_balance)}</div></div>
-            <div className="stat-card"><div className="stat-label">أرباح مستحقة</div><div className="stat-value amber">{fmt(Number(inv.profit_due||0)-Number(inv.profit_paid||0))}</div><div className="stat-sub">مدفوع: {fmt(inv.profit_paid)}</div></div>
-            {invDeals.length>0 && <div className="stat-card"><div className="stat-label">عمليات كممول</div><div className="stat-value">{invDeals.length}</div><div className="stat-sub">إجمالي: {fmt(invDeals.reduce((a,x)=>a+Number(x.amount||0),0))}</div></div>}
-          </>}
-          {entity && <>
-            <div className="stat-card"><div className="stat-label">عمليات كيان</div><div className="stat-value">{entDeals.length}</div></div>
-            <div className="stat-card"><div className="stat-label">إجمالي قيمة العمليات</div><div className="stat-value">{fmtShort(entDeals.reduce((a,x)=>a+Number(x.value||0),0))}</div></div>
-          </>}
-          {broker && <>
-            <div className="stat-card"><div className="stat-label">عمولات مستحقة</div><div className="stat-value amber">{fmt(Number(broker.commission_due||0)-Number(broker.commission_paid||0))}</div></div>
-            <div className="stat-card"><div className="stat-label">عمليات كوسيط</div><div className="stat-value">{brkDeals.length}</div></div>
-          </>}
-          {client && <>
-            <div className="stat-card"><div className="stat-label">توريدات كعميل</div><div className="stat-value">{cliDeals.length}</div></div>
-            <div className="stat-card"><div className="stat-label">إجمالي قيمة التوريدات</div><div className="stat-value">{fmtShort(cliDeals.reduce((a,x)=>a+Number(x.value||0),0))}</div></div>
-          </>}
+      {/* ── KPI Bar ── */}
+      <div style={{display:'flex',gap:12,padding:'12px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap'}}>
+        <div className="kpi-card" style={{flex:1,minWidth:120}}>
+          <div className="kpi-label">عمليات مرتبطة</div>
+          <div className="kpi-value">{totalDeals}</div>
         </div>
-      )}
+        {inv && <>
+          <div className="kpi-card" style={{flex:1,minWidth:120}}>
+            <div className="kpi-label">رصيد متاح</div>
+            <div className="kpi-value green">{fmtShort(inv.available_balance)}</div>
+          </div>
+          <div className="kpi-card" style={{flex:1,minWidth:120}}>
+            <div className="kpi-label">رصيد عامل</div>
+            <div className="kpi-value blue">{fmtShort(inv.working_balance)}</div>
+          </div>
+          <div className="kpi-card" style={{flex:1,minWidth:120}}>
+            <div className="kpi-label">أرباح مستحقة</div>
+            <div className="kpi-value amber">{fmtShort(Number(inv.profit_due||0)-Number(inv.profit_paid||0))}</div>
+          </div>
+        </>}
+        {broker && <>
+          <div className="kpi-card" style={{flex:1,minWidth:120}}>
+            <div className="kpi-label">عمولات مستحقة</div>
+            <div className="kpi-value amber">{fmtShort(Number(broker.commission_due||0)-Number(broker.commission_paid||0))}</div>
+          </div>
+        </>}
+        {(entDeals.length>0||cliDeals.length>0) && <>
+          <div className="kpi-card" style={{flex:1,minWidth:120}}>
+            <div className="kpi-label">إجمالي قيمة العمليات</div>
+            <div className="kpi-value">{fmtShort([...entDeals,...cliDeals].reduce((a,d)=>a+Number(d.value||0),0))}</div>
+          </div>
+        </>}
+      </div>
 
       <div className="party-sections">
 
-        {/* Section: العمليات */}
+        {/* ── Section: إدارة الأدوار ── */}
+        <div className="party-section">
+          <div className="party-section-header" onClick={()=>toggleSection('roles')}>
+            <div className="party-section-title"><Icon d={Icons.role}/> الأدوار</div>
+            <span style={{fontSize:12,color:'var(--text3)'}}>{sections.roles?'▲':'▼'}</span>
+          </div>
+          {sections.roles && <div className="party-section-body">
+            {/* الأدوار الحالية */}
+            <div style={{display:'flex',flexDirection:'column',gap:8,marginBottom:12}}>
+              {roles.map(r => (
+                <div key={r.id} style={{
+                  display:'flex',alignItems:'center',justifyContent:'space-between',
+                  padding:'10px 14px',borderRadius:10,
+                  background: r.is_active ? 'var(--bg3)' : 'rgba(100,116,139,.08)',
+                  border:`1px solid ${r.is_active ? 'var(--border)' : 'rgba(100,116,139,.2)'}`,
+                  opacity: r.is_active ? 1 : 0.65,
+                }}>
+                  <div style={{display:'flex',alignItems:'center',gap:10}}>
+                    <span className={`role-pill ${r.is_active ? (roleColors[r.role]||'role-other') : 'role-other'}`}>
+                      {roleLabels[r.role]||r.role}
+                    </span>
+                    <span style={{fontSize:12,color:'var(--text3)'}}>
+                      {r.is_active ? '✅ نشط' : '⛔ معطل'}
+                      {' · '}منذ {new Date(r.created_at).toLocaleDateString('ar-EG')}
+                    </span>
+                  </div>
+                  <button
+                    onClick={()=>toggleRole(r.id, r.is_active)}
+                    style={{
+                      padding:'4px 12px',borderRadius:6,border:'1px solid var(--border)',
+                      background:'none',color:r.is_active?'var(--red)':'var(--green)',
+                      cursor:'pointer',fontSize:12,fontFamily:'Cairo,sans-serif',
+                    }}>
+                    {r.is_active ? 'تعطيل' : 'تفعيل'}
+                  </button>
+                </div>
+              ))}
+            </div>
+            {/* إضافة دور جديد */}
+            {availableRoles.length > 0 && (
+              <button
+                onClick={()=>{ setAddRoleModal(true); setAddRoleType(availableRoles[0]); }}
+                className="topbar-btn btn-primary"
+                style={{fontSize:12}}>
+                <Icon d={Icons.plus}/> إضافة دور جديد
+              </button>
+            )}
+            {availableRoles.length === 0 && (
+              <div style={{fontSize:12,color:'var(--text3)',padding:'8px 0'}}>✅ هذا الطرف لديه جميع الأدوار المتاحة</div>
+            )}
+          </div>}
+        </div>
+
+        {/* ── Section: العمليات المرتبطة ── */}
         {(invDeals.length>0||entDeals.length>0||brkDeals.length>0||cliDeals.length>0) && (
           <div className="party-section">
             <div className="party-section-header" onClick={()=>toggleSection('deals')}>
               <div className="party-section-title"><Icon d={Icons.deals}/> العمليات المرتبطة</div>
-              <span style={{fontSize:12,color:'var(--text3)'}}>{sections.deals?'▲':'▼'}</span>
+              <span style={{fontSize:12,color:'var(--text3)'}}>{totalDeals} عملية {sections.deals?'▲':'▼'}</span>
             </div>
             {sections.deals && <div className="party-section-body">
               {inv && invDeals.length>0 && <div style={{marginBottom:12}}>
-                <div style={{fontSize:12,fontWeight:600,color:'var(--text3)',marginBottom:6}}>كـ ممول</div>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:6,textTransform:'uppercase',letterSpacing:1}}>كـ ممول</div>
                 {invDeals.map(di=>(
                   <div key={di.id} className="action-item" onClick={()=>di.deals&&navigateSub&&navigateSub('deals',di.deals.id)}>
-                    <span style={{fontWeight:600,fontSize:13}}>{di.deals?.deal_number} — {di.deals?.name}</span>
-                    <span style={{color:'var(--green)',fontSize:12}}>{fmt(di.amount)}</span>
+                    <span style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span className="priority-dot" style={{background:'var(--accent)'}}/>
+                      <span style={{fontWeight:600}}>{di.deals?.deal_number}</span>
+                      <span style={{color:'var(--text2)',fontSize:12}}>{di.deals?.name}</span>
+                    </span>
+                    <span style={{color:'var(--green)',fontWeight:600}}>{fmt(di.amount)}</span>
                   </div>
                 ))}
               </div>}
               {entity && entDeals.length>0 && <div style={{marginBottom:12}}>
-                <div style={{fontSize:12,fontWeight:600,color:'var(--text3)',marginBottom:6}}>كـ كيان منفذ</div>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:6,textTransform:'uppercase',letterSpacing:1}}>كـ كيان منفذ</div>
                 {entDeals.map(d=>(
                   <div key={d.id} className="action-item" onClick={()=>navigateSub&&navigateSub('deals',d.id)}>
-                    <span style={{fontWeight:600,fontSize:13}}>{d.deal_number} — {d.name}</span>
+                    <span style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span className="priority-dot" style={{background:'rgba(139,92,246,.7)'}}/>
+                      <span style={{fontWeight:600}}>{d.deal_number}</span>
+                      <span style={{color:'var(--text2)',fontSize:12}}>{d.name}</span>
+                    </span>
                     <span className={`badge ${(STATUS_MAP[d.status]||{cls:'badge-gray'}).cls}`}>{(STATUS_MAP[d.status]||{label:d.status}).label}</span>
                   </div>
                 ))}
               </div>}
               {broker && brkDeals.length>0 && <div style={{marginBottom:12}}>
-                <div style={{fontSize:12,fontWeight:600,color:'var(--text3)',marginBottom:6}}>كـ وسيط</div>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:6,textTransform:'uppercase',letterSpacing:1}}>كـ وسيط</div>
                 {brkDeals.map(d=>(
                   <div key={d.id} className="action-item" onClick={()=>d.deals&&navigateSub&&navigateSub('deals',d.deals.id)}>
-                    <span style={{fontWeight:600,fontSize:13}}>{d.deals?.deal_number} — {d.deals?.name}</span>
-                    <span style={{color:'var(--amber)',fontSize:12}}>{fmt(d.commission_due)}</span>
+                    <span style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span className="priority-dot" style={{background:'var(--amber)'}}/>
+                      <span style={{fontWeight:600}}>{d.deals?.deal_number}</span>
+                      <span style={{color:'var(--text2)',fontSize:12}}>{d.deals?.name}</span>
+                    </span>
+                    <span style={{color:'var(--amber)',fontWeight:600,fontSize:12}}>{fmt(d.commission_due)}</span>
                   </div>
                 ))}
               </div>}
               {client && cliDeals.length>0 && <div>
-                <div style={{fontSize:12,fontWeight:600,color:'var(--text3)',marginBottom:6}}>كـ عميل</div>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:6,textTransform:'uppercase',letterSpacing:1}}>كـ عميل</div>
                 {cliDeals.map(d=>(
                   <div key={d.id} className="action-item" onClick={()=>navigateSub&&navigateSub('deals',d.id)}>
-                    <span style={{fontWeight:600,fontSize:13}}>{d.deal_number} — {d.name}</span>
-                    <span style={{color:'var(--green)',fontSize:12}}>{fmt(d.value)}</span>
+                    <span style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span className="priority-dot" style={{background:'var(--green)'}}/>
+                      <span style={{fontWeight:600}}>{d.deal_number}</span>
+                      <span style={{color:'var(--text2)',fontSize:12}}>{d.name}</span>
+                    </span>
+                    <span style={{color:'var(--green)',fontWeight:600,fontSize:12}}>{fmt(d.value)}</span>
                   </div>
                 ))}
               </div>}
@@ -1598,11 +1718,11 @@ function PartyProfile({ partyId, onBack, navigateSub }) {
           </div>
         )}
 
-        {/* Section: Timeline */}
+        {/* ── Section: Timeline ── */}
         <div className="party-section">
           <div className="party-section-header" onClick={()=>toggleSection('timeline')}>
             <div className="party-section-title"><Icon d={Icons.clock}/> السجل الكامل</div>
-            <span style={{fontSize:12,color:'var(--text3)'}}>{sections.timeline?'▲':'▼'}</span>
+            <span style={{fontSize:12,color:'var(--text3)'}}>{tl.length} حدث {sections.timeline?'▲':'▼'}</span>
           </div>
           {sections.timeline && <>
             <div className="timeline-filters">
@@ -1615,7 +1735,7 @@ function PartyProfile({ partyId, onBack, navigateSub }) {
             {tl.length===0
               ? <Empty icon="📋" title="لا سجلات بعد"/>
               : <div className="timeline">
-                  {tl.map((item,i)=>(
+                  {tl.map(item=>(
                     <div key={item.id} className="timeline-item">
                       <div className="timeline-line"/>
                       <div className="timeline-dot" style={{
@@ -1624,7 +1744,7 @@ function PartyProfile({ partyId, onBack, navigateSub }) {
                       <div className="timeline-content">
                         <div className="timeline-title">{item.title}</div>
                         <div className="timeline-sub">{item.sub} · {item.date?new Date(item.date).toLocaleDateString('ar-EG'):''}</div>
-                        {item.amount>0 && <div className="timeline-amount" style={{color:item.dir==='in'?'var(--green)':'var(--amber)'}}>
+                        {item.amount>0 && <div style={{fontSize:12,fontWeight:600,color:item.dir==='in'?'var(--green)':'var(--amber)',marginTop:2}}>
                           {item.dir==='in'?'+':'-'}{fmt(item.amount)}
                         </div>}
                       </div>
@@ -1636,7 +1756,7 @@ function PartyProfile({ partyId, onBack, navigateSub }) {
 
       </div>
 
-      {/* Edit Modal */}
+      {/* ── Edit Party Modal ── */}
       {editModal && <Modal title="تعديل بيانات الطرف" onClose={()=>setEditModal(false)} onSave={saveEdit} saving={saving}>
         <Field label="الاسم" required>
           <Input value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})}/>
@@ -1654,11 +1774,42 @@ function PartyProfile({ partyId, onBack, navigateSub }) {
           <textarea className="form-input" rows={3} value={editForm.notes} onChange={e=>setEditForm({...editForm,notes:e.target.value})} style={{resize:'vertical'}}/>
         </Field>
       </Modal>}
+
+      {/* ── Add Role Modal ── */}
+      {addRoleModal && <Modal title="إضافة دور جديد" onClose={()=>{setAddRoleModal(false);setAddRoleType('');}} onSave={saveAddRole} saving={addRoleSaving} saveLabel="إضافة">
+        <div style={{background:'var(--bg3)',borderRadius:10,padding:'12px 14px',marginBottom:16,fontSize:13}}>
+          <div style={{fontWeight:600,marginBottom:4}}>{party.name}</div>
+          {party.phone && <div style={{color:'var(--text2)',fontSize:12}}>📞 {party.phone}</div>}
+          {party.email && <div style={{color:'var(--text2)',fontSize:12}}>✉️ {party.email}</div>}
+          <div style={{fontSize:11,color:'var(--text3)',marginTop:6}}>بيانات الطرف ستُستخدم تلقائياً — لا حاجة لإعادة إدخالها</div>
+        </div>
+        <Field label="الدور الجديد" required>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+            {availableRoles.map(r=>(
+              <button key={r} type="button"
+                onClick={()=>setAddRoleType(r)}
+                style={{padding:'8px 16px',borderRadius:20,border:'1px solid',fontSize:13,cursor:'pointer',
+                  fontFamily:'Cairo,sans-serif',transition:'all .15s',
+                  background: addRoleType===r ? 'var(--accent)' : 'var(--bg3)',
+                  borderColor: addRoleType===r ? 'var(--accent)' : 'var(--border)',
+                  color: addRoleType===r ? 'white' : 'var(--text2)',
+                }}>
+                {addRoleType===r?'✓ ':''}{roleLabels[r]}
+              </button>
+            ))}
+          </div>
+        </Field>
+        {addRoleType==='investor' && (
+          <Field label="طاقة التمويل (اختياري)">
+            <Input type="number" value={addRoleExtra.funding_capacity} onChange={e=>setAddRoleExtra({...addRoleExtra,funding_capacity:e.target.value})} placeholder="0"/>
+          </Field>
+        )}
+      </Modal>}
+
     </div>
   );
 }
 
-// ── Parties (الشاشة الموحدة) ──
 function Parties({ navigateSub, navigateBack, subId }) {
   const [parties, setParties] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2899,6 +3050,7 @@ function DealDetail({ dealId, onBack }) {
   const [accounts, setAccounts] = useState([]);
   const [dealInvestors, setDealInvestors] = useState([]);
   const [collections, setCollections] = useState([]);
+  const [supplyOrders, setSupplyOrders] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [dealBrokers, setDealBrokers] = useState([]);
   const [distributions, setDistributions] = useState([]);
@@ -2916,12 +3068,126 @@ function DealDetail({ dealId, onBack }) {
   const [lockModal, setLockModal]     = useState(false);
   const [reopenModal, setReopenModal] = useState(false);
   const [editModal, setEditModal]     = useState(false);
+  const [partyTransferModal, setPartyTransferModal] = useState(false);
+
+  // ── Supply Orders ──
+  const [soModal, setSoModal]     = useState(false);
+  const [soForm, setSoForm]       = useState({ order_number:'', order_date:'', expected_amount:'', notes:'' });
+  const [soSaving, setSoSaving]   = useState(false);
+  const SO_STATUS = { pending:'معلق', confirmed:'مؤكد', invoiced:'مُفاتَر', paid:'مدفوع', cancelled:'ملغى' };
+  const SO_STATUS_CLS = { pending:'badge-amber', confirmed:'badge-blue', invoiced:'badge-purple', paid:'badge-green', cancelled:'badge-gray' };
+
+  // ── Profit Periods (العمليات المتكررة) ──
+  const [profitPeriods, setProfitPeriods] = useState([]);
+  const [ppModal, setPpModal]   = useState(false);
+  const [ppForm, setPpForm]     = useState({ start_date:'', end_date:'', profit_amount:'', notes:'' });
+  const [ppSaving, setPpSaving] = useState(false);
+  const PP_STATUS = { pending:'معلقة', distributed:'موزَّعة', cancelled:'ملغاة' };
+  const PP_STATUS_CLS = { pending:'badge-amber', distributed:'badge-green', cancelled:'badge-gray' };
+
+  const savePP = async () => {
+    if (ppSaving) return;
+    setPpSaving(true);
+    try {
+      if (deal?.is_locked) throw new Error('العملية مقفولة');
+      const amt = assertPositiveAmount(ppForm.profit_amount, 'قيمة الربح');
+      await callRpc('create_profit_period_atomic', {
+        p_deal_id:       dealId,
+        p_period_number: null, // تلقائي
+        p_start_date:    ppForm.start_date || todayStr(),
+        p_end_date:      ppForm.end_date   || null,
+        p_profit_amount: amt,
+        p_notes:         ppForm.notes      || null,
+      });
+      setPpModal(false);
+      setPpForm({ start_date:'', end_date:'', profit_amount:'', notes:'' });
+      await load();
+    } catch(err) { showError(err, 'إضافة دورة ربح'); }
+    finally { setPpSaving(false); }
+  };
+
+  const saveSO = async () => {
+    if (soSaving) return;
+    setSoSaving(true);
+    try {
+      if (deal?.is_locked) throw new Error('العملية مقفولة');
+      await callRpc('create_supply_order_atomic', {
+        p_deal_id:         dealId,
+        p_order_number:    soForm.order_number || null,
+        p_order_date:      soForm.order_date   || todayStr(),
+        p_expected_amount: Number(soForm.expected_amount) || 0,
+        p_notes:           soForm.notes        || null,
+        p_idempotency_key: makeStableKey('so', dealId, makeNonce()),
+      });
+      setSoModal(false);
+      setSoForm({ order_number:'', order_date:'', expected_amount:'', notes:'' });
+      await load();
+    } catch(err) { showError(err, 'إضافة أمر توريد'); }
+    finally { setSoSaving(false); }
+  };
+
+  const updateSOStatus = async (orderId, newStatus) => {
+    try {
+      await callRpc('update_supply_order_atomic', {
+        p_order_id: orderId, p_status: newStatus,
+        p_order_number:null, p_order_date:null,
+        p_expected_amount:null, p_actual_amount:null, p_notes:null,
+      });
+      await load();
+    } catch(err) { showError(err, 'تحديث الحالة'); }
+  };
 
   const [invForm, setInvForm]   = useState({ investor_id:'', amount:'', return_type:'profit_percentage', return_value:'', _nonce: makeNonce() });
   const [colForm, setColForm]   = useState({ amount:'', collection_date: new Date().toISOString().slice(0,10), payment_method:'cash', account_id:'', notes:'', _nonce: makeNonce() });
   const [expForm, setExpForm]   = useState({ category:'نقل وشحن', amount:'', expense_date: new Date().toISOString().slice(0,10), account_id:'', description:'', _nonce: makeNonce() });
   const [newStatus, setNewStatus] = useState('');
   const [reopenReason, setReopenReason] = useState('');
+
+  // ── تحويل لطرف عام (شركة مشتريات، لوجستيات، إلخ) ──
+  // يستخدم payee_type='party' في record_payment_atomic — أي party
+  // في النظام يمكنه استقبال تحويل بدون الحاجة لجدول suppliers مستقل
+  const [partyTransferForm, setPartyTransferForm] = useState({
+    party_id:'', party_name:'', amount:'', account_id:'', notes:'', _nonce: makeNonce(),
+  });
+  const [partySearchQ, setPartySearchQ] = useState('');
+  const [partySearchResults, setPartySearchResults] = useState([]);
+
+  useEffect(() => {
+    if (!partySearchQ || partySearchQ.trim().length < 2) { setPartySearchResults([]); return; }
+    const t = setTimeout(async () => {
+      const { data } = await sb.rpc('search_parties', { search_term: partySearchQ.trim() });
+      setPartySearchResults(data || []);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [partySearchQ]);
+
+  const savePartyTransfer = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      if (!partyTransferForm.party_id) throw new Error('اختر الطرف المستلم أولاً');
+      const amt = assertPositiveAmount(partyTransferForm.amount, 'مبلغ التحويل');
+      if (deal?.is_locked) throw new Error('العملية مقفولة — لا يمكن إضافة تحويلات');
+      if (!partyTransferForm.account_id) throw new Error('اختر الحساب المحوَّل منه');
+      await callRpc('record_payment_atomic', {
+        p_payee_type:      'party',
+        p_payee_id:         partyTransferForm.party_id,
+        p_payment_type:     'transfer_to_party',
+        p_amount:           amt,
+        p_payment_date:     todayStr(),
+        p_account_id:       partyTransferForm.account_id,
+        p_deal_id:          dealId,
+        p_notes:            partyTransferForm.notes || null,
+        p_idempotency_key:  makeStableKey('party_transfer', dealId, partyTransferForm._nonce),
+      });
+      await addTimeline('party_transfer', `تحويل إلى: ${partyTransferForm.party_name}`, partyTransferForm.notes, amt);
+      setPartyTransferModal(false);
+      setPartyTransferForm({ party_id:'', party_name:'', amount:'', account_id:'', notes:'', _nonce: makeNonce() });
+      setPartySearchQ(''); setPartySearchResults([]);
+      await load();
+    } catch(err) { showError(err, 'تحويل لطرف'); }
+    finally { setSaving(false); }
+  };
 
   // توزيع الأرباح — قابل للتوسع بأي عدد من المستفيدين
   const emptyBene = { beneficiary_type:'investor', beneficiary_id:'', beneficiary_name_snapshot:'', amount_type:'manual', percentage:'', amount:'' };
@@ -2964,9 +3230,10 @@ function DealDetail({ dealId, onBack }) {
           return { data: [], hasError: true, label };
         }
       };
-      const [rDi, rCol, rExp, rInv, rDb, rDist, rTl, rEnt, rAcc] = await Promise.all([
+      const [rDi, rCol, rSO, rExp, rInv, rDb, rDist, rTl, rEnt, rAcc, rPP] = await Promise.all([
         safeQuery(sb.from('deal_investors').select('*, investors(name)').eq('deal_id', dealId), 'deal_investors'),
         safeQuery(sb.from('collections').select('*').eq('deal_id', dealId).order('collection_date'), 'collections'),
+        safeQuery(sb.from('v_supply_orders_with_cheques').select('*').eq('deal_id', dealId).order('order_date',{ascending:false}), 'supply_orders'),
         safeQuery(sb.from('expenses').select('*').eq('deal_id', dealId).order('expense_date'), 'expenses'),
         safeQuery(fetchInvestorParties(), 'investors'),
         safeQuery(sb.from('deal_brokers').select('*, brokers(name)').eq('deal_id', dealId), 'deal_brokers'),
@@ -2974,16 +3241,19 @@ function DealDetail({ dealId, onBack }) {
         safeQuery(sb.from('deal_timeline').select('*').eq('deal_id', dealId).order('created_at', { ascending: false }), 'deal_timeline'),
         safeQuery(fetchPartiesByRole('entity'), 'entities'),
         safeQuery(sb.from('accounts').select('id,name,balance'), 'accounts'),
+        safeQuery(sb.from('deal_profit_periods').select('*').eq('deal_id', dealId).order('period_number'), 'profit_periods'),
       ]);
 
       // Identify which critical queries failed — these affect financial calculations
       const criticalErrors = [rCol, rExp, rDist].filter(r => r.hasError).map(r => r.label);
-      const nonCriticalErrors = [rDi, rInv, rDb, rTl, rEnt, rAcc].filter(r => r.hasError).map(r => r.label);
+      const nonCriticalErrors = [rDi, rInv, rDb, rTl, rEnt, rAcc, rSO].filter(r => r.hasError).map(r => r.label);
       const allErrors = [...criticalErrors, ...nonCriticalErrors];
 
       setDeal(d);
       setDealInvestors(rDi.data);
       setCollections(rCol.data);
+      setSupplyOrders(rSO.data);
+      setProfitPeriods(rPP?.data || []);
       setExpenses(rExp.data);
       setInvestors(rInv.data);
       setDealBrokers(rDb.data);
@@ -3002,6 +3272,9 @@ function DealDetail({ dealId, onBack }) {
         supply_price: d.supply_price || 0,
         tax_applicable: d.tax_applicable || false,
         tax_expected: d.tax_expected || 0,
+        vat_amount: d.vat_amount || 0,
+        withholding_amount: d.withholding_amount || 0,
+        income_tax_amount: d.income_tax_amount || 0,
         taxable_profit: d.taxable_profit || 0,
         taxable_profit_manual: d.taxable_profit_manual || false,
         funding_required: d.funding_required || 0,
@@ -3158,11 +3431,19 @@ function DealDetail({ dealId, onBack }) {
     setSaving(true);
     try {
       const tp = editForm.taxable_profit_manual ? Number(editForm.taxable_profit) : null;
+      // tax_expected = مجموع الضرائب الثلاثة تلقائياً (للتوافق الخلفي مع أي كود يعتمد عليه)
+      const vat   = Number(editForm.vat_amount)||0;
+      const wh    = Number(editForm.withholding_amount)||0;
+      const inc   = Number(editForm.income_tax_amount)||0;
+      const totalTax = editForm.tax_applicable ? (vat+wh+inc) : 0;
       const { error: upErr } = await sb.from('deals').update({
         name: editForm.name, value: Number(editForm.value),
         actual_cost: Number(editForm.actual_cost), taxable_cost: Number(editForm.taxable_cost),
         supply_price: Number(editForm.supply_price),
-        tax_applicable: editForm.tax_applicable, tax_expected: Number(editForm.tax_expected),
+        tax_applicable: editForm.tax_applicable, tax_expected: totalTax,
+        vat_amount: editForm.tax_applicable ? vat : 0,
+        withholding_amount: editForm.tax_applicable ? wh : 0,
+        income_tax_amount: editForm.tax_applicable ? inc : 0,
         taxable_profit: tp, taxable_profit_manual: editForm.taxable_profit_manual,
         funding_required: Number(editForm.funding_required),
         due_date: editForm.due_date||null, expected_collection_date: editForm.expected_collection_date||null,
@@ -3182,6 +3463,34 @@ function DealDetail({ dealId, onBack }) {
   const removeDistRow = (i) => setDistRows(r=>r.filter((_,idx)=>idx!==i));
   const updateDistRow = (i, field, val) => setDistRows(r=>r.map((row,idx)=>idx===i?{...row,[field]:val}:row));
 
+  // دمج تلقائي للصفوف التي تشترك في نفس party_id (نفس الطرف بأكثر من دور)
+  const mergeDuplicatePartyRows = () => {
+    const warnings = partyIdentityWarnings();
+    if (!warnings.length) return;
+    setDistRows(prev => {
+      let rows = [...prev];
+      warnings.forEach(w => {
+        const indices = w.rows.map(r=>r.index).sort((a,b)=>a-b);
+        const keepIdx = indices[0];
+        const mergeIdxs = indices.slice(1);
+        const mergedAmount = indices.reduce((sum, idx) => sum + (Number(rows[idx]?.amount)||0), 0);
+        const mergedRoles  = w.rows.map(r=>beneTypes[r.type]||r.type).join(' + ');
+        rows[keepIdx] = {
+          ...rows[keepIdx],
+          amount: String(mergedAmount),
+          beneficiary_name_snapshot: `${w.rows[0].name} (${mergedRoles})`,
+        };
+      });
+      // حذف الصفوف المدموجة (بترتيب عكسي حتى لا تتغير الفهارس)
+      const toRemove = new Set(warnings.flatMap(w => w.rows.map(r=>r.index)).filter((idx,_,arr)=>{
+        // احتفظ فقط بأول index لكل مجموعة، احذف الباقي
+        const group = warnings.find(w=>w.rows.some(r=>r.index===idx));
+        return group && group.rows[0].index !== idx;
+      }));
+      return rows.filter((_, idx) => !toRemove.has(idx));
+    });
+  };
+
   const calcDistAmount = (row) => {
     if (row.amount_type==='manual') return Number(row.amount)||0;
     if (row.amount_type==='percentage') return Math.round(netProfit * (Number(row.percentage)||0) / 100);
@@ -3196,6 +3505,14 @@ function DealDetail({ dealId, onBack }) {
     try {
     if (deal?.is_locked) throw new Error('العملية مقفولة — لا يمكن توزيع الأرباح');
     if (netProfit <= 0) throw new Error('لا يمكن توزيع أرباح — صافي الربح صفر أو سالب');
+
+    // ── Business Rule: Party Identity ──
+    // منع تسجيل مستحقين منفصلين لنفس الـ party (مثل كيان=ممول) قبل الدمج
+    const dupWarnings = partyIdentityWarnings();
+    if (dupWarnings.length > 0) {
+      const names = dupWarnings.map(w => w.rows.map(r=>r.name).join(' / ')).join('، ');
+      throw new Error(`الطرف "${names}" مكرر بأكثر من دور في هذا التوزيع — ادمج صفوفه في مستحق واحد قبل المتابعة (راجع التحذير أعلى القائمة)`);
+    }
 
     const rows = valid.map(r=>({
       deal_id: dealId,
@@ -3281,6 +3598,31 @@ function DealDetail({ dealId, onBack }) {
   const retTypes = { profit_percentage:'نسبة من الربح', capital_percentage:'نسبة من رأس المال', fixed_amount:'مبلغ ثابت', custom:'اتفاق خاص' };
   const payMethods = { cash:'كاش', cheque:'شيك', transfer:'تحويل' };
   const beneTypes = { investor:'ممول', entity:'كيان', owner:'المالك (عمرو)', broker:'وسيط', other:'أخرى' };
+
+  // ── Business Rule: Party Identity ──
+  // يكتشف إذا كان أي مستفيدَين في صفوف التوزيع يشتركان في نفس party_id
+  // (نفس الشخص/الشركة بأكثر من دور: مثل كيان+ممول) ويُحذِّر المستخدم
+  // بدل احتساب ربحين منفصلين لنفس الطرف. يعتمد على party_id الموجود
+  // في investors/entities/brokers (عبر fetchPartiesByRole/fetchInvestorParties).
+  const getPartyIdForBene = (row) => {
+    if (!row.beneficiary_id) return null;
+    if (row.beneficiary_type==='investor') return investors.find(x=>(x.role_record_id||x.id)===row.beneficiary_id)?.id || null;
+    if (row.beneficiary_type==='entity')   return entities.find(x=>(x.role_record_id||x.id)===row.beneficiary_id)?.id || null;
+    return null;
+  };
+
+  const partyIdentityWarnings = () => {
+    const seen = {}; // party_id -> [{index, type}]
+    distRows.forEach((row, i) => {
+      const pid = getPartyIdForBene(row);
+      if (!pid) return;
+      if (!seen[pid]) seen[pid] = [];
+      seen[pid].push({ index:i, type:row.beneficiary_type, name:row.beneficiary_name_snapshot });
+    });
+    return Object.entries(seen)
+      .filter(([_, rows]) => rows.length > 1)
+      .map(([partyId, rows]) => ({ partyId, rows }));
+  };
   const tlIcons = { status_change:'🔄', collection:'💰', expense:'🧾', investor_added:'👤', profit_distributed:'📊', locked:'🔒', reopened:'🔓', note:'📝', attachment:'📎' };
   const attCats = { purchase_invoice:'فاتورة شراء', sales_invoice:'فاتورة بيع', bank_transfer:'تحويل بنكي', cheque:'شيك', contract:'عقد', quotation:'عرض سعر', tax_document:'مستند ضريبي', other:'أخرى' };
   const expCats = ['نقل وشحن','وقود','عمولات بنكية','عمولة وسيط','ضرائب','مشتريات','تحميل وتفريغ','مصروفات إدارية','أخرى'];
@@ -3424,7 +3766,7 @@ function DealDetail({ dealId, onBack }) {
       {/* Tabs */}
       <div className="section">
         <div className="tabs">
-          {[['overview','نظرة عامة'],['investors','الممولون'],['collections','التحصيلات'],['expenses','المصروفات'],['distributions','توزيع الأرباح'],['timeline','السجل']].map(([k,l])=>(
+          {[['overview','نظرة عامة'],['supply_orders','أوامر التوريد'],['investors','الممولون'],['collections','التحصيلات'],['expenses','المصروفات'],['distributions','توزيع الأرباح'],['profit_periods','الدورات'],['timeline','السجل']].map(([k,l])=>(
             <button key={k} className={`tab ${tab===k?'active':''}`} onClick={()=>setTab(k)}>{l}</button>
           ))}
         </div>
@@ -3437,7 +3779,6 @@ function DealDetail({ dealId, onBack }) {
               ['العميل', deal.clients?.name||'—'],
               ['النوع', deal.deal_type==='supply'?'توريد':'تمويل'],
               ['سعر الشراء', fmt(deal.supply_price)],
-              ['الضريبة المتوقعة', deal.tax_applicable?fmt(deal.tax_expected):'غير خاضع'],
               ['تاريخ الإنشاء', new Date(deal.created_at).toLocaleDateString('ar-EG')],
               ['تاريخ الاستحقاق', deal.due_date||'—'],
               ['التحصيل المتوقع', deal.expected_collection_date||'—'],
@@ -3449,15 +3790,81 @@ function DealDetail({ dealId, onBack }) {
                 <div style={{fontWeight:500}}>{val}</div>
               </div>
             ))}
-            {deal.notes && <div style={{gridColumn:'1/-1'}}>
+          </div>
+          {/* قسم الضرائب — منفصل */}
+          {deal.tax_applicable && <div style={{marginTop:18,paddingTop:16,borderTop:'1px solid var(--border)'}}>
+            <div style={{fontSize:12,fontWeight:700,color:'var(--text3)',marginBottom:10,textTransform:'uppercase',letterSpacing:1}}>الضرائب</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
+              <div className="stat-card">
+                <div className="stat-label">ضريبة القيمة المضافة (VAT)</div>
+                <div className="stat-value amber">{fmt(deal.vat_amount)}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">خصم تحت حساب الضريبة</div>
+                <div className="stat-value amber">{fmt(deal.withholding_amount)}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">ضريبة الدخل</div>
+                <div className="stat-value amber">{fmt(deal.income_tax_amount)}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">إجمالي الضرائب</div>
+                <div className="stat-value" style={{color:'var(--red)'}}>{fmt(deal.tax_expected)}</div>
+              </div>
+            </div>
+          </div>}
+          {deal.notes && <div style={{marginTop:18,paddingTop:16,borderTop:'1px solid var(--border)'}}>
               <div style={{fontSize:11,color:'var(--text3)',marginBottom:3}}>ملاحظات</div>
               <div style={{color:'var(--text2)'}}>{deal.notes}</div>
-            </div>}
+          </div>}
           </div>
           {isLocked && deal.reopen_reason && <div style={{marginTop:16,background:'rgba(239,68,68,.08)',border:'1px solid rgba(239,68,68,.2)',borderRadius:8,padding:'10px 14px',fontSize:13}}>
             <div style={{fontWeight:600,color:'var(--red)',marginBottom:4}}>سبب إعادة الفتح</div>
             <div style={{color:'var(--text2)'}}>{deal.reopen_reason}</div>
           </div>}
+        </div>}
+
+        {/* Supply Orders */}
+        {tab==='supply_orders' && <div>
+          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:13,color:'var(--text2)'}}>
+              <strong>{supplyOrders.length}</strong> أمر توريد &nbsp;·&nbsp;
+              إجمالي متوقع: <strong style={{color:'var(--accent)'}}>{fmt(supplyOrders.reduce((a,o)=>a+Number(o.expected_amount||0),0))}</strong>
+            </span>
+            {!isLocked && <button className="topbar-btn btn-primary" onClick={()=>setSoModal(true)}>
+              <Icon d={Icons.plus}/> أمر توريد جديد
+            </button>}
+          </div>
+          {supplyOrders.length===0
+            ? <Empty icon="📦" title="لا توجد أوامر توريد" sub="أضف أول أمر توريد لهذه العملية"/>
+            : <table className="table">
+                <thead><tr>
+                  <th>#</th><th>رقم الأمر</th><th>التاريخ</th>
+                  <th>المتوقع</th><th>الفعلي</th><th>الحالة</th><th>ملاحظات</th>
+                  {!isLocked && <th></th>}
+                </tr></thead>
+                <tbody>{supplyOrders.map((so,i)=>(
+                  <tr key={so.id}>
+                    <td style={{color:'var(--text3)',fontSize:11}}>{i+1}</td>
+                    <td style={{fontWeight:600,fontFamily:'monospace'}}>{so.order_number||'—'}</td>
+                    <td>{so.order_date||'—'}</td>
+                    <td style={{color:'var(--accent)'}}>{fmt(so.expected_amount)}</td>
+                    <td style={{color:so.actual_amount?'var(--green)':'var(--text3)'}}>
+                      {so.actual_amount!=null ? fmt(so.actual_amount) : '—'}
+                    </td>
+                    <td><span className={`badge ${SO_STATUS_CLS[so.status]||'badge-gray'}`}>{SO_STATUS[so.status]||so.status}</span></td>
+                    <td style={{color:'var(--text2)',fontSize:12}}>{so.notes||'—'}</td>
+                    {!isLocked && <td>
+                      <select
+                        value={so.status}
+                        onChange={e=>updateSOStatus(so.id,e.target.value)}
+                        style={{fontSize:11,padding:'3px 6px',borderRadius:6,border:'1px solid var(--border)',background:'var(--bg3)',color:'var(--text)',fontFamily:'Cairo,sans-serif',cursor:'pointer'}}>
+                        {Object.entries(SO_STATUS).map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                      </select>
+                    </td>}
+                  </tr>
+                ))}</tbody>
+              </table>}
         </div>}
 
         {/* Investors */}
@@ -3506,9 +3913,12 @@ function DealDetail({ dealId, onBack }) {
 
         {/* Expenses */}
         {tab==='expenses' && <div>
-          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap'}}>
             <span style={{fontSize:13,color:'var(--text2)'}}>إجمالي: <strong style={{color:'var(--red)'}}>{fmt(totalExpenses)}</strong></span>
-            {!isLocked && <button className="topbar-btn btn-primary" onClick={()=>setExpModal(true)}><Icon d={Icons.plus}/> إضافة مصروف</button>}
+            <div style={{display:'flex',gap:8}}>
+              {!isLocked && <button className="topbar-btn" style={{background:'var(--bg3)',color:'var(--text)'}} onClick={()=>setPartyTransferModal(true)}><Icon d={Icons.deposit}/> تحويل لطرف</button>}
+              {!isLocked && <button className="topbar-btn btn-primary" onClick={()=>setExpModal(true)}><Icon d={Icons.plus}/> إضافة مصروف</button>}
+            </div>
           </div>
           {expenses.length===0
             ? <Empty icon="🧾" title="لا توجد مصروفات"/>
@@ -3578,6 +3988,44 @@ function DealDetail({ dealId, onBack }) {
               </table>}
         </div>}
 
+        {/* Profit Periods */}
+        {tab==='profit_periods' && <div>
+          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div>
+              <span style={{fontSize:13,color:'var(--text2)'}}>
+                <strong>{profitPeriods.length}</strong> دورة &nbsp;·&nbsp;
+                موزَّع: <strong style={{color:'var(--green)'}}>{fmt(profitPeriods.filter(p=>p.status==='distributed').reduce((a,p)=>a+Number(p.profit_amount||0),0))}</strong>
+                &nbsp;·&nbsp;
+                معلق: <strong style={{color:'var(--amber)'}}>{fmt(profitPeriods.filter(p=>p.status==='pending').reduce((a,p)=>a+Number(p.profit_amount||0),0))}</strong>
+              </span>
+            </div>
+            {!isLocked && <button className="topbar-btn btn-primary" onClick={()=>setPpModal(true)}>
+              <Icon d={Icons.plus}/> دورة جديدة
+            </button>}
+          </div>
+          {profitPeriods.length===0
+            ? <Empty icon="🔄" title="لا توجد دورات ربح" sub="أضف دورة لتتبع الأرباح الدورية مع بقاء رأس المال مستثمراً"/>
+            : <table className="table">
+                <thead><tr>
+                  <th>الدورة</th><th>من</th><th>إلى</th>
+                  <th>الربح</th><th>الحالة</th><th>تاريخ التوزيع</th><th>ملاحظات</th>
+                </tr></thead>
+                <tbody>{profitPeriods.map(p=>(
+                  <tr key={p.id}>
+                    <td style={{fontWeight:700,color:'var(--accent)'}}>#{p.period_number}</td>
+                    <td style={{fontSize:12}}>{p.start_date||'—'}</td>
+                    <td style={{fontSize:12}}>{p.end_date||'مفتوحة'}</td>
+                    <td style={{fontWeight:600,color:'var(--green)'}}>{fmt(p.profit_amount)}</td>
+                    <td><span className={`badge ${PP_STATUS_CLS[p.status]||'badge-gray'}`}>{PP_STATUS[p.status]||p.status}</span></td>
+                    <td style={{fontSize:12,color:'var(--text2)'}}>
+                      {p.distributed_at ? new Date(p.distributed_at).toLocaleDateString('ar-EG') : '—'}
+                    </td>
+                    <td style={{color:'var(--text2)',fontSize:12}}>{p.notes||'—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>}
+        </div>}
+
         {/* Timeline */}
         {tab==='timeline' && <div style={{padding:18}}>
           {timeline.length===0
@@ -3611,11 +4059,15 @@ function DealDetail({ dealId, onBack }) {
               <div className="form-group"><label className="form-label">سعر التوريد</label>
                 <input className="form-input" type="number" value={editForm.value||''} onChange={e=>setEditForm({...editForm,value:e.target.value})}/>
               </div>
-              <div className="form-group"><label className="form-label">التكلفة الفعلية</label>
+              <div className="form-group">
+                <label className="form-label">التكلفة الفعلية للشراء</label>
                 <input className="form-input" type="number" value={editForm.actual_cost||''} onChange={e=>setEditForm({...editForm,actual_cost:e.target.value})} placeholder="0"/>
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>المبلغ الحقيقي المدفوع — يُحسب منه الربح الفعلي</div>
               </div>
-              <div className="form-group"><label className="form-label">تكلفة الفاتورة الضريبية</label>
+              <div className="form-group">
+                <label className="form-label">قيمة الفاتورة الضريبية</label>
                 <input className="form-input" type="number" value={editForm.taxable_cost||''} onChange={e=>setEditForm({...editForm,taxable_cost:e.target.value})} placeholder="0"/>
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>مرجع ضريبي فقط — لا يحرك البنك، يُحسب منه الربح الضريبي</div>
               </div>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
@@ -3632,13 +4084,29 @@ function DealDetail({ dealId, onBack }) {
               </div>
             </div>
             <div style={{background:'var(--bg3)',borderRadius:8,padding:'12px 14px',marginBottom:12}}>
-              <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:14,marginBottom:8}}>
+              <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:14,marginBottom:10}}>
                 <input type="checkbox" checked={editForm.tax_applicable||false} onChange={e=>setEditForm({...editForm,tax_applicable:e.target.checked})} style={{width:16,height:16}}/>
                 العملية خاضعة للضريبة
               </label>
               {editForm.tax_applicable && <>
-                <div className="form-group"><label className="form-label">الضريبة المتوقعة (ج.م)</label>
-                  <input className="form-input" type="number" value={editForm.tax_expected||''} onChange={e=>setEditForm({...editForm,tax_expected:e.target.value})}/>
+                {/* Version 1 — ضرائب منفصلة (VAT / Withholding / Income Tax) */}
+                {/* مُصمَّمة كأعمدة في deals الآن — يسهل نقلها لجدول deal_taxes مستقبلاً */}
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:8}}>
+                  <div className="form-group">
+                    <label className="form-label">ضريبة القيمة المضافة (VAT)</label>
+                    <input className="form-input" type="number" value={editForm.vat_amount||''} onChange={e=>setEditForm({...editForm,vat_amount:e.target.value})} placeholder="0"/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">خصم تحت حساب الضريبة</label>
+                    <input className="form-input" type="number" value={editForm.withholding_amount||''} onChange={e=>setEditForm({...editForm,withholding_amount:e.target.value})} placeholder="0"/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">ضريبة الدخل</label>
+                    <input className="form-input" type="number" value={editForm.income_tax_amount||''} onChange={e=>setEditForm({...editForm,income_tax_amount:e.target.value})} placeholder="0"/>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:'var(--text2)',marginBottom:8,paddingTop:6,borderTop:'1px solid var(--border)'}}>
+                  إجمالي الضرائب المتوقعة: <strong>{fmt((Number(editForm.vat_amount)||0)+(Number(editForm.withholding_amount)||0)+(Number(editForm.income_tax_amount)||0))}</strong>
                 </div>
                 <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:13,marginTop:8}}>
                   <input type="checkbox" checked={editForm.taxable_profit_manual||false} onChange={e=>setEditForm({...editForm,taxable_profit_manual:e.target.checked})} style={{width:14,height:14}}/>
@@ -3689,6 +4157,33 @@ function DealDetail({ dealId, onBack }) {
                 <span>{fmt(distRows.reduce((a,r)=>a+calcDistAmount(r),0))}</span>
               </div>
             </div>
+
+            {/* ── Business Rule Banner: Party Identity ── */}
+            {partyIdentityWarnings().length > 0 && (
+              <div style={{
+                background:'rgba(245,158,11,.1)', border:'1px solid rgba(245,158,11,.4)',
+                borderRadius:10, padding:'12px 14px', marginBottom:12,
+                display:'flex', alignItems:'flex-start', gap:10,
+              }}>
+                <span style={{fontSize:18,flexShrink:0}}>⚠️</span>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:600,color:'var(--amber)',marginBottom:4}}>
+                    تنبيه: نفس الطرف مكرر بأكثر من دور
+                  </div>
+                  <div style={{fontSize:12,color:'var(--text2)',marginBottom:8}}>
+                    {partyIdentityWarnings().map(w=>w.rows.map(r=>`${r.name} (${beneTypes[r.type]||r.type})`).join(' + ')).join('، ')}
+                    {' '}— هذا يمثل مستحقاً واحداً وليس مستحقَين منفصلَين. ادمجهما لتجنب احتساب ربح مضاعف.
+                  </div>
+                  <button
+                    onClick={mergeDuplicatePartyRows}
+                    className="topbar-btn"
+                    style={{background:'var(--amber)',color:'#1a1a1a',fontSize:12,padding:'5px 14px'}}>
+                    دمج تلقائي للصفوف المكررة
+                  </button>
+                </div>
+              </div>
+            )}
+
             {(distRows||[]).map((row,i)=>(
               <div key={i} style={{background:'var(--bg3)',borderRadius:8,padding:'12px 14px',marginBottom:10}}>
                 <div style={{display:'flex',justifyContent:'space-between',marginBottom:10}}>
@@ -3856,6 +4351,88 @@ function DealDetail({ dealId, onBack }) {
           <div className="modal-footer">
             <button className="topbar-btn btn-ghost" onClick={()=>setExpModal(false)}>إلغاء</button>
             <button className="topbar-btn btn-primary" onClick={saveExpense} disabled={saving}>{saving?'جاري الحفظ...':'حفظ'}</button>
+          </div>
+        </div>
+      </div>}
+
+      {/* تحويل لطرف عام (شركة مشتريات / لوجستيات / إلخ) */}
+      {ppModal && <Modal title="دورة ربح جديدة" onClose={()=>setPpModal(false)} onSave={savePP} saving={ppSaving} saveLabel="إضافة">
+        <div style={{background:'rgba(61,127,255,.08)',border:'1px solid rgba(61,127,255,.2)',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:12,color:'var(--text2)'}}>
+          💡 رأس المال يظل مستثمراً داخل العملية — هذه الدورة تُوزَّع فيها الأرباح فقط
+        </div>
+        <Field label="تاريخ بداية الدورة" required>
+          <Input type="date" value={ppForm.start_date||todayStr()} onChange={e=>setPpForm({...ppForm,start_date:e.target.value})}/>
+        </Field>
+        <Field label="تاريخ نهاية الدورة">
+          <Input type="date" value={ppForm.end_date} onChange={e=>setPpForm({...ppForm,end_date:e.target.value})} placeholder="اختياري — اتركه فارغاً للدورات المفتوحة"/>
+        </Field>
+        <Field label="قيمة الربح (ج.م)" required>
+          <Input type="number" value={ppForm.profit_amount} onChange={e=>setPpForm({...ppForm,profit_amount:e.target.value})} placeholder="0"/>
+        </Field>
+        <Field label="ملاحظات">
+          <Input value={ppForm.notes} onChange={e=>setPpForm({...ppForm,notes:e.target.value})} placeholder="اختياري"/>
+        </Field>
+      </Modal>}
+
+      {soModal && <Modal title="أمر توريد جديد" onClose={()=>setSoModal(false)} onSave={saveSO} saving={soSaving} saveLabel="إضافة">
+        <Field label="رقم الأمر">
+          <Input value={soForm.order_number} onChange={e=>setSoForm({...soForm,order_number:e.target.value})} placeholder="مثال: PO-2025-001 (اختياري)"/>
+        </Field>
+        <Field label="تاريخ الأمر">
+          <Input type="date" value={soForm.order_date||todayStr()} onChange={e=>setSoForm({...soForm,order_date:e.target.value})}/>
+        </Field>
+        <Field label="القيمة المتوقعة (ج.م)">
+          <Input type="number" value={soForm.expected_amount} onChange={e=>setSoForm({...soForm,expected_amount:e.target.value})} placeholder="0"/>
+        </Field>
+        <Field label="ملاحظات">
+          <Input value={soForm.notes} onChange={e=>setSoForm({...soForm,notes:e.target.value})} placeholder="اختياري"/>
+        </Field>
+      </Modal>}
+
+      {partyTransferModal && <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setPartyTransferModal(false)}>
+        <div className="modal">
+          <div className="modal-header"><span className="modal-title">تحويل أموال لطرف</span><button className="modal-close" onClick={()=>setPartyTransferModal(false)}>✕</button></div>
+          <div className="modal-body">
+            <div style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>
+              استخدم هذا لتحويل أموال لشركة مشتريات أو لوجستيات أو أي طرف لا يملك حساباً تشغيلياً في النظام — لا يؤثر على أرصدة الممولين أو الوسطاء.
+            </div>
+            <div className="form-group">
+              <label className="form-label">البحث عن الطرف</label>
+              {partyTransferForm.party_id
+                ? <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 12px',background:'var(--bg3)',borderRadius:8}}>
+                    <span style={{fontWeight:600,fontSize:13}}>{partyTransferForm.party_name}</span>
+                    <button onClick={()=>setPartyTransferForm({...partyTransferForm,party_id:'',party_name:''})}
+                      style={{background:'none',border:'none',color:'var(--red)',cursor:'pointer',fontSize:13}}>تغيير</button>
+                  </div>
+                : <>
+                  <input className="form-input" value={partySearchQ} onChange={e=>setPartySearchQ(e.target.value)} placeholder="ابحث بالاسم..."/>
+                  {partySearchResults.length>0 && <div style={{marginTop:6,border:'1px solid var(--border)',borderRadius:8,maxHeight:160,overflowY:'auto'}}>
+                    {partySearchResults.map(p=>(
+                      <div key={p.id} onClick={()=>{ setPartyTransferForm({...partyTransferForm,party_id:p.id,party_name:p.name}); setPartySearchQ(''); setPartySearchResults([]); }}
+                        style={{padding:'8px 12px',cursor:'pointer',fontSize:13,borderBottom:'1px solid var(--border)'}}
+                        onMouseEnter={e=>e.currentTarget.style.background='var(--bg3)'} onMouseLeave={e=>e.currentTarget.style.background='none'}>
+                        {p.name} {p.roles?.length?<span style={{color:'var(--text3)',fontSize:11}}> ({p.roles.join(', ')})</span>:''}
+                      </div>
+                    ))}
+                  </div>}
+                </>}
+            </div>
+            <div className="form-group"><label className="form-label">المبلغ (ج.م)</label>
+              <input className="form-input" type="number" value={partyTransferForm.amount} onChange={e=>setPartyTransferForm({...partyTransferForm,amount:e.target.value})} placeholder="0"/>
+            </div>
+            <div className="form-group"><label className="form-label">الحساب المحوَّل منه</label>
+              <select className="form-select" value={partyTransferForm.account_id} onChange={e=>setPartyTransferForm({...partyTransferForm,account_id:e.target.value})}>
+                <option value="">اختر الحساب</option>
+                {(accounts||[]).map(a=><option key={a.id} value={a.id}>{a.name} — {fmt(a.balance)}</option>)}
+              </select>
+            </div>
+            <div className="form-group"><label className="form-label">ملاحظات</label>
+              <input className="form-input" value={partyTransferForm.notes} onChange={e=>setPartyTransferForm({...partyTransferForm,notes:e.target.value})} placeholder="اختياري"/>
+            </div>
+          </div>
+          <div className="modal-footer">
+            <button className="topbar-btn btn-ghost" onClick={()=>setPartyTransferModal(false)}>إلغاء</button>
+            <button className="topbar-btn btn-primary" onClick={savePartyTransfer} disabled={saving}>{saving?'جاري الحفظ...':'تأكيد التحويل'}</button>
           </div>
         </div>
       </div>}
