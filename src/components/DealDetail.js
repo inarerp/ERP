@@ -760,7 +760,6 @@ function DealDetail({ dealId, onBack }) {
               <div style={{fontSize:11,color:'var(--text3)',marginBottom:3}}>ملاحظات</div>
               <div style={{color:'var(--text2)'}}>{deal.notes}</div>
           </div>}
-          </div>
           {isLocked && deal.reopen_reason && <div style={{marginTop:16,background:'rgba(239,68,68,.08)',border:'1px solid rgba(239,68,68,.2)',borderRadius:8,padding:'10px 14px',fontSize:13}}>
             <div style={{fontWeight:600,color:'var(--red)',marginBottom:4}}>سبب إعادة الفتح</div>
             <div style={{color:'var(--text2)'}}>{deal.reopen_reason}</div>
