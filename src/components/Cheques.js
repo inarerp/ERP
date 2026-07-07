@@ -98,6 +98,58 @@ function Cheques() {
   };
   const nextStatus = { received:'deposited', deposited:'collected' };
 
+  // ── ربط الشيك بأمر/أوامر توريد (يعتمد على البنية الموجودة من Phase 9:
+  // supply_order_cheques + link_supply_order_cheque_atomic — هنا فقط
+  // نعرض الواجهة، الجدول والـ RPC جاهزين بالفعل) ──
+  const [linkModal, setLinkModal]     = useState(false);
+  const [linkTarget, setLinkTarget]   = useState(null);   // الشيك المُراد ربطه
+  const [dealOrders, setDealOrders]   = useState([]);      // أوامر توريد العملية
+  const [alreadyLinked, setAlreadyLinked] = useState(new Set()); // أوامر مربوطة بالفعل بهذا الشيك
+  const [selectedOrderIds, setSelectedOrderIds] = useState(new Set());
+  const [linking, setLinking] = useState(false);
+
+  const openLinkModal = async (cheque) => {
+    if (!cheque.deal_id) { alert('هذا الشيك غير مرتبط بأي عملية — اربطه بعملية أولاً'); return; }
+    setLinkTarget(cheque);
+    const [{ data: orders }, { data: links }] = await Promise.all([
+      sb.from('v_supply_orders_with_cheques').select('*').eq('deal_id', cheque.deal_id).order('order_date',{ascending:false}),
+      sb.from('supply_order_cheques').select('supply_order_id').eq('cheque_id', cheque.id),
+    ]);
+    const linkedSet = new Set((links||[]).map(l=>l.supply_order_id));
+    setDealOrders(orders||[]);
+    setAlreadyLinked(linkedSet);
+    setSelectedOrderIds(new Set(linkedSet)); // مبدئيًا نفس المربوط حاليًا
+    setLinkModal(true);
+  };
+
+  const toggleOrderSelection = (orderId) => {
+    setSelectedOrderIds(prev => {
+      const next = new Set(prev);
+      if (next.has(orderId)) next.delete(orderId); else next.add(orderId);
+      return next;
+    });
+  };
+
+  const saveLinkChanges = async () => {
+    setLinking(true);
+    try {
+      // نربط فقط الأوامر المُختارة حديثًا (اللي مكنتش مربوطة قبل كده)
+      // ملاحظة: الـ RPC الحالية بتدعم الربط فقط وليس فك الربط —
+      // لو حبيت تشيل ربطاً موجوداً، ده يحتاج قرار وRPC إضافية لاحقًا
+      const toLink = [...selectedOrderIds].filter(id => !alreadyLinked.has(id));
+      for (const orderId of toLink) {
+        await sb.rpc('link_supply_order_cheque_atomic', {
+          p_supply_order_id: orderId,
+          p_cheque_id: linkTarget.id,
+        });
+      }
+      setLinkModal(false);
+      await load();
+    } catch(err) { showError(err, 'ربط الشيك بأوامر التوريد'); }
+    finally { setLinking(false); }
+  };
+
+
   const today   = new Date(); today.setHours(0,0,0,0);
   const in7days = new Date(today); in7days.setDate(today.getDate()+7);
 
@@ -192,6 +244,12 @@ function Cheques() {
                     )}
                     {/* received→returned: logistical only */}
                     {c.status==='received'&&<button onClick={()=>updateStatus(c.id,'returned',c)} style={{fontSize:11,padding:'3px 7px',borderRadius:6,background:'rgba(239,68,68,.08)',border:'1px solid rgba(239,68,68,.2)',color:'var(--red)',cursor:'pointer',fontFamily:'Cairo,sans-serif'}}>مرتجع</button>}
+                    {/* ربط بأوامر توريد — متاح فقط لو الشيك مرتبط بعملية */}
+                    {c.deal_id && (
+                      <button onClick={()=>openLinkModal(c)} style={{fontSize:11,padding:'3px 8px',borderRadius:6,background:'rgba(61,127,255,.08)',border:'1px solid rgba(61,127,255,.3)',color:'var(--accent)',cursor:'pointer',fontFamily:'Cairo,sans-serif'}}>
+                        🔗 أوامر توريد
+                      </button>
+                    )}
                   </td>
                 </tr>;
               })}</tbody>
@@ -278,6 +336,58 @@ function Cheques() {
             <button className="topbar-btn btn-ghost" onClick={()=>setCollectModal(false)}>إلغاء</button>
             <button className="topbar-btn btn-primary" onClick={confirmCollect} disabled={saving||!collectAccountId}>
               {saving?'جاري التحصيل...':'✓ تأكيد التحصيل'}
+            </button>
+          </div>
+        </div>
+      </div>}
+
+      {linkModal && linkTarget && <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setLinkModal(false)}>
+        <div className="modal" style={{maxWidth:460}}>
+          <div className="modal-header">
+            <span className="modal-title">ربط الشيك بأوامر توريد</span>
+            <button className="modal-close" onClick={()=>setLinkModal(false)}>✕</button>
+          </div>
+          <div className="modal-body">
+            <div style={{background:'var(--bg3)',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:13}}>
+              <div style={{fontWeight:700,marginBottom:4}}>
+                {linkTarget.cheque_number ? 'شيك رقم ' + linkTarget.cheque_number : 'شيك'} — {linkTarget.deals?.deal_number||''}
+              </div>
+              <div style={{color:'var(--green)',fontWeight:700,fontSize:16}}>{fmt(linkTarget.amount)}</div>
+            </div>
+            <div style={{fontSize:12,color:'var(--text3)',marginBottom:10}}>
+              شيك واحد ممكن يغطي أمر توريد واحد أو أكتر — اختر الأوامر اللي بيغطيها الشيك ده.
+            </div>
+            {dealOrders.length===0
+              ? <Empty icon="📦" title="لا توجد أوامر توريد لهذه العملية"/>
+              : <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                  {dealOrders.map(o=>(
+                    <label key={o.id} style={{
+                      display:'flex',alignItems:'center',gap:10,padding:'10px 12px',
+                      borderRadius:8,border:'1px solid var(--border)',cursor:'pointer',
+                      background: selectedOrderIds.has(o.id) ? 'rgba(61,127,255,.08)' : 'var(--bg3)',
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedOrderIds.has(o.id)}
+                        onChange={()=>toggleOrderSelection(o.id)}
+                        disabled={alreadyLinked.has(o.id)}
+                        style={{width:16,height:16}}
+                      />
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:600,fontSize:13}}>
+                          {o.order_number || 'أمر بدون رقم'}
+                          {alreadyLinked.has(o.id) && <span style={{fontSize:11,color:'var(--green)',marginRight:6}}>✓ مربوط بالفعل</span>}
+                        </div>
+                        <div style={{fontSize:11,color:'var(--text3)'}}>{o.order_date} — متوقَّع: {fmt(o.expected_amount)}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>}
+          </div>
+          <div className="modal-footer">
+            <button className="topbar-btn btn-ghost" onClick={()=>setLinkModal(false)}>إلغاء</button>
+            <button className="topbar-btn btn-primary" onClick={saveLinkChanges} disabled={linking}>
+              {linking?'جاري الربط...':'حفظ الربط'}
             </button>
           </div>
         </div>
