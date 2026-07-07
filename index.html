@@ -1099,6 +1099,7 @@ const editProfitDistribution = async (distId, newAmount, currentAmount, investor
 </script>
 
 <script type="text/babel" src="src/components/Reconciliation.js"></script>
+<script type="text/babel" src="src/components/DeveloperTools.js"></script>
 <script type="text/babel">
 
 // ── Nav config ──
@@ -1117,12 +1118,14 @@ const PAGE_TITLES = {
   accounts:'الحسابات', movements:'الحركات المالية', cheques:'الشيكات',
   owner:'أرباح المالك', reconciliation:'مطابقة الأرصدة',
   entities:'الكيانات', investors:'الممولون', brokers:'الوسطاء', clients:'العملاء',
+  devtools:'أدوات المطوّر',
 };
 const PAGE_COMPONENTS = {
   dashboard:Dashboard, deals:Deals, parties:Parties,
   entities:Entities, investors:Investors, brokers:Brokers, clients:Clients,
   accounts:Accounts, movements:FinancialMovements, cheques:Cheques,
   owner:OwnerDashboard, reconciliation:Reconciliation,
+  devtools:DeveloperTools, // مخفية عمداً — وصول فقط عبر #devtools، غير مدرجة في PAGES/BOTTOM_NAV
 };
 
 // ── Global Search ──
@@ -1243,6 +1246,13 @@ function App() {
           <button className="nav-item" onClick={logout} style={{width:'100%'}}>
             <Icon d={Icons.logout}/> تسجيل الخروج
           </button>
+          <div
+            onClick={()=>navigate('devtools')}
+            style={{textAlign:'center',fontSize:10,color:'var(--text3)',opacity:.4,cursor:'pointer',padding:'8px 0 2px',userSelect:'none'}}
+            title="Developer Tools — للتطوير فقط"
+          >
+            dev tools
+          </div>
         </div>
       </aside>
 
