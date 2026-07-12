@@ -2,6 +2,8 @@ function DealDetail({ dealId, onBack }) {
   const [deal, setDeal] = useState(null);
   const [investors, setInvestors] = useState([]);
   const [entities, setEntities] = useState([]);
+  const [clientParties, setClientParties] = useState([]);
+  const [brokerParties, setBrokerParties] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [dealInvestors, setDealInvestors] = useState([]);
   const [collections, setCollections] = useState([]);
@@ -92,8 +94,8 @@ function DealDetail({ dealId, onBack }) {
     } catch(err) { showError(err, 'تحديث الحالة'); }
   };
 
-  const [invForm, setInvForm]   = useState({ investor_id:'', amount:'', return_type:'profit_percentage', return_value:'', _nonce: makeNonce() });
-  const [colForm, setColForm]   = useState({ amount:'', collection_date: new Date().toISOString().slice(0,10), payment_method:'cash', account_id:'', notes:'', _nonce: makeNonce() });
+  const [invForm, setInvForm]   = useState({ investor_id:'', amount:'', return_type:'profit_percentage', return_value:'', expected_settlement_date:'', _nonce: makeNonce() });
+  const [colForm, setColForm]   = useState({ amount:'', collection_date: new Date().toISOString().slice(0,10), payment_method:'cash', account_id:'', notes:'', collection_type:'final', _nonce: makeNonce() });
   const [expForm, setExpForm]   = useState({ category:'نقل وشحن', amount:'', expense_date: new Date().toISOString().slice(0,10), account_id:'', description:'', _nonce: makeNonce() });
   const [newStatus, setNewStatus] = useState('');
   const [reopenReason, setReopenReason] = useState('');
@@ -173,7 +175,7 @@ function DealDetail({ dealId, onBack }) {
       // instead of throwing on failure. Financial calculations MUST check hasError
       // before using data. If any critical query fails we surface a banner and
       // block sensitive actions.
-      const [rDi, rCol, rSO, rExp, rInv, rDb, rDist, rTl, rEnt, rAcc, rPP] = await Promise.all([
+      const [rDi, rCol, rSO, rExp, rInv, rDb, rDist, rTl, rEnt, rAcc, rPP, rCli, rBrk] = await Promise.all([
         safeQuery(sb.from('deal_investors').select('*, investors(name)').eq('deal_id', dealId), 'deal_investors'),
         safeQuery(sb.from('collections').select('*').eq('deal_id', dealId).order('collection_date'), 'collections'),
         safeQuery(sb.from('v_supply_orders_with_cheques').select('*').eq('deal_id', dealId).order('order_date',{ascending:false}), 'supply_orders'),
@@ -185,6 +187,8 @@ function DealDetail({ dealId, onBack }) {
         safeQuery(fetchPartiesByRole('entity'), 'entities'),
         safeQuery(sb.from('accounts').select('id,name,balance'), 'accounts'),
         safeQuery(sb.from('deal_profit_periods').select('*').eq('deal_id', dealId).order('period_number'), 'profit_periods'),
+        safeQuery(fetchPartiesByRole('client'), 'clients'),
+        safeQuery(fetchPartiesByRole('broker'), 'brokers'),
       ]);
 
       // Identify which critical queries failed — these affect financial calculations
@@ -204,11 +208,17 @@ function DealDetail({ dealId, onBack }) {
       setTimeline(rTl.data);
       setEntities(rEnt.data);
       setAccounts(rAcc.data);
+      setClientParties(rCli?.data || []);
+      setBrokerParties(rBrk?.data || []);
       // Store which critical queries failed so the UI can warn the user
       setDataWarnings(criticalErrors);
       setNewStatus(d.status || 'studying');
       setEditForm({
         name: d.name || '',
+        deal_number: d.deal_number || '',
+        deal_type: d.deal_type || 'supply',
+        client_id: d.client_id || '',
+        entity_id: d.entity_id || '',
         value: d.value || 0,
         actual_cost: d.actual_cost || 0,
         taxable_cost: d.taxable_cost || 0,
@@ -260,10 +270,11 @@ function DealDetail({ dealId, onBack }) {
         p_return_value:    Number(invForm.return_value) || 0,
         p_notes:           `تخصيص لعملية ${deal.deal_number}`,
         p_idempotency_key: makeStableKey('alloc', dealId, invForm.investor_id, invForm._nonce || makeNonce()),
+        p_expected_settlement_date: invForm.expected_settlement_date || null,
       });
       await addTimeline('investor_added', `ممول جديد: ${invData?.name}`, `المبلغ: ${fmt(amt)}`, amt);
       setInvModal(false);
-      setInvForm({ investor_id:'', amount:'', return_type:'profit_percentage', return_value:'', _nonce: makeNonce() });
+      setInvForm({ investor_id:'', amount:'', return_type:'profit_percentage', return_value:'', expected_settlement_date:'', _nonce: makeNonce() });
       await load();
     } catch(err) { showError(err, 'تخصيص ممول'); }
     finally { setSaving(false); }
@@ -286,12 +297,13 @@ function DealDetail({ dealId, onBack }) {
         p_account_id:      colForm.account_id      || null,
         p_notes:           colForm.notes            || null,
         p_idempotency_key: makeStableKey('col', dealId, colForm._nonce),
+        p_collection_type: colForm.collection_type  || 'final',
       });
       await addTimeline('collection',
         `تحصيل — ${{cash:'كاش',cheque:'شيك',transfer:'تحويل'}[colForm.payment_method]||colForm.payment_method}`,
         colForm.notes, amt);
       setColModal(false);
-      setColForm({ amount:'', collection_date: todayStr(), payment_method:'cash', account_id:'', notes:'', _nonce: makeNonce() });
+      setColForm({ amount:'', collection_date: todayStr(), payment_method:'cash', account_id:'', notes:'', collection_type:'final', _nonce: makeNonce() });
       await load();
     } catch(err) { showError(err, 'تسجيل تحصيل'); }
     finally { setSaving(false); }
@@ -373,26 +385,41 @@ function DealDetail({ dealId, onBack }) {
     if (deal?.is_locked) { showError(new Error('الصفقة مقفولة — استخدم إعادة الفتح قبل التعديل'), 'تعديل'); return; }
     setSaving(true);
     try {
+      const isSupply = deal.deal_type === 'supply';
       const tp = editForm.taxable_profit_manual ? Number(editForm.taxable_profit) : null;
       // tax_expected = مجموع الضرائب الثلاثة تلقائياً (للتوافق الخلفي مع أي كود يعتمد عليه)
       const vat   = Number(editForm.vat_amount)||0;
       const wh    = Number(editForm.withholding_amount)||0;
       const inc   = Number(editForm.income_tax_amount)||0;
-      const totalTax = editForm.tax_applicable ? (vat+wh+inc) : 0;
-      const { error: upErr } = await sb.from('deals').update({
-        name: editForm.name, value: Number(editForm.value),
-        actual_cost: Number(editForm.actual_cost), taxable_cost: Number(editForm.taxable_cost),
-        supply_price: Number(editForm.supply_price),
-        tax_applicable: editForm.tax_applicable, tax_expected: totalTax,
-        vat_amount: editForm.tax_applicable ? vat : 0,
-        withholding_amount: editForm.tax_applicable ? wh : 0,
-        income_tax_amount: editForm.tax_applicable ? inc : 0,
-        taxable_profit: tp, taxable_profit_manual: editForm.taxable_profit_manual,
+      const totalTax = isSupply && editForm.tax_applicable ? (vat+wh+inc) : 0;
+      const updatePayload = {
+        name: editForm.name, deal_number: editForm.deal_number, deal_type: editForm.deal_type,
+        value: Number(editForm.value),
+        client_id: editForm.client_id || null,
         funding_required: Number(editForm.funding_required),
         due_date: editForm.due_date||null, expected_collection_date: editForm.expected_collection_date||null,
         expected_end_date: editForm.expected_end_date||null, actual_end_date: editForm.actual_end_date||null,
         notes: editForm.notes,
-      }).eq('id', dealId).eq('is_locked', false);
+      };
+      // الكيان المنفذ: قابل للتعديل فقط قبل تخصيص أول ممول — بعدها يُمنع تمامًا
+      // (حماية إضافية هنا في الواجهة، جنب الشرط في عرض الحقل نفسه)
+      if (dealInvestors.length === 0) {
+        updatePayload.entity_id = editForm.entity_id || null;
+      }
+      // حقول التوريد/التكلفة/الضرائب — لعمليات التوريد فقط، غير منطقية للتمويل
+      if (isSupply) {
+        Object.assign(updatePayload, {
+          actual_cost: Number(editForm.actual_cost), taxable_cost: Number(editForm.taxable_cost),
+          supply_price: Number(editForm.supply_price),
+          tax_applicable: editForm.tax_applicable, tax_expected: totalTax,
+          vat_amount: editForm.tax_applicable ? vat : 0,
+          withholding_amount: editForm.tax_applicable ? wh : 0,
+          income_tax_amount: editForm.tax_applicable ? inc : 0,
+          taxable_profit: tp, taxable_profit_manual: editForm.taxable_profit_manual,
+        });
+      }
+      const { error: upErr } = await sb.from('deals').update(updatePayload)
+        .eq('id', dealId).eq('is_locked', false);
       if (upErr) throw upErr;
       await addTimeline('note', 'تم تعديل بيانات العملية');
       setEditModal(false);
@@ -436,7 +463,7 @@ function DealDetail({ dealId, onBack }) {
 
   const calcDistAmount = (row) => {
     if (row.amount_type==='manual') return Number(row.amount)||0;
-    if (row.amount_type==='percentage') return Math.round(netProfit * (Number(row.percentage)||0) / 100);
+    if (row.amount_type==='percentage') return Math.round(distributableProfit * (Number(row.percentage)||0) / 100);
     return Number(row.amount)||0;
   };
 
@@ -447,7 +474,7 @@ function DealDetail({ dealId, onBack }) {
 
     try {
     if (deal?.is_locked) throw new Error('العملية مقفولة — لا يمكن توزيع الأرباح');
-    if (netProfit <= 0) throw new Error('لا يمكن توزيع أرباح — صافي الربح صفر أو سالب');
+    if (distributableProfit <= 0) throw new Error('لا يمكن توزيع أرباح — المتاح للتوزيع صفر أو سالب (بعد خصم ضريبة الدخل المتوقعة إن وُجدت)');
 
     // ── Business Rule: Party Identity ──
     // منع تسجيل مستحقين منفصلين لنفس الـ party (مثل كيان=ممول) قبل الدمج
@@ -472,8 +499,8 @@ function DealDetail({ dealId, onBack }) {
     const totalAfter  = alreadyDist + total;
 
     if (total <= 0) throw new Error('يجب أن يكون إجمالي التوزيع أكبر من صفر');
-    if (totalAfter > netProfit * 1.01)
-      throw new Error(`إجمالي التوزيع (${totalAfter.toLocaleString('ar-EG')} ج.م) أكبر من صافي الربح (${netProfit.toLocaleString('ar-EG')} ج.م)`);
+    if (totalAfter > distributableProfit * 1.01)
+      throw new Error(`إجمالي التوزيع (${totalAfter.toLocaleString('ar-EG')} ج.م) أكبر من المتاح للتوزيع (${distributableProfit.toLocaleString('ar-EG')} ج.م)`);
 
     setSaving(true);
     // P2A-05: Replaced individual RPC loop with a single batch RPC call.
@@ -508,8 +535,10 @@ function DealDetail({ dealId, onBack }) {
     if (saving) return;
     setSaving(true);
     try {
-      if (remaining > 0.01)
-        throw new Error(`لا يمكن القفل — يوجد مبلغ غير محصّل: ${fmt(remaining)}`);
+      // ملاحظة: التحصيل الناقص والأرباح غير الموزعة لم يعودا يمنعان القفل —
+      // يُعرَضان كتحذيرات في نافذة التأكيد (lockModal) والقرار النهائي يدوي بالكامل.
+      // القيد الوحيد الملزم يبقى في lock_deal_atomic نفسها: رأس مال الممولين
+      // يجب أن يكون قد أُعيد بالكامل (capital_released) قبل القفل.
       await callRpc('lock_deal_atomic', {
         p_deal_id:           dealId,
         p_total_distributed: totalDistributed,
@@ -597,11 +626,17 @@ function DealDetail({ dealId, onBack }) {
   const remaining        = Number(deal.value||0) - totalCollected;
   const actualCost       = Number(deal.actual_cost||deal.cost||0);
   const taxCost          = Number(deal.taxable_cost||0);
-  const netProfit        = totalCollected - actualCost - totalExpenses;
-  const taxableProfit    = deal.taxable_profit_manual
+  const netProfit         = totalCollected - actualCost - totalExpenses;
+  // Taxable Profit = Supply Value (القيمة التعاقدية الكاملة) − Taxable Purchase Cost
+  // بدون خصم المصروفات ولا استخدام التحصيل الفعلي — قرار عمل صريح:
+  // الضريبة تُحسب على أساس الفاتورة الضريبية والقيمة التعاقدية، لا على أساس نقدي
+  const taxableProfit     = deal.taxable_profit_manual
     ? Number(deal.taxable_profit||0)
-    : totalCollected - taxCost - totalExpenses;
-  const undistributed    = netProfit - totalDistributed;
+    : Number(deal.value||0) - taxCost;
+  // ضريبة الدخل المتوقعة تُخصَم من الربح الحقيقي (وليس الضريبي) للوصول للمتاح للتوزيع
+  const expectedIncomeTax = deal.deal_type==='supply' && deal.tax_applicable ? Number(deal.income_tax_amount||0) : 0;
+  const distributableProfit = netProfit - expectedIncomeTax;
+  const undistributed    = distributableProfit - totalDistributed;
   const fundingGap       = Number(deal.funding_required||0) - Number(deal.funding_provided||0);
 
   const st = STATUS_MAP[deal.status]||{label:deal.status,cls:'badge-gray'};
@@ -821,7 +856,10 @@ function DealDetail({ dealId, onBack }) {
                 <thead><tr><th>الممول</th><th>المبلغ</th><th>نوع العائد</th><th>العائد</th><th>مستحق</th><th>مدفوع</th></tr></thead>
                 <tbody>{(dealInvestors||[]).map(di=>(
                   <tr key={di.id}>
-                    <td style={{fontWeight:600}}>{di.investors?.name||'—'}</td>
+                    <td style={{fontWeight:600}}>
+                      {di.investors?.name||'—'}
+                      {di.expected_settlement_date && <div style={{fontSize:10,color:'var(--text3)',fontWeight:400,marginTop:2}}>استحقاق متوقَّع: {di.expected_settlement_date}</div>}
+                    </td>
                     <td style={{color:'var(--accent)'}}>{fmt(di.amount)}</td>
                     <td><span className="badge badge-gray">{retTypes[di.return_type]||di.return_type}</span></td>
                     <td>{['profit_percentage','capital_percentage'].includes(di.return_type)?di.return_value+'%':fmt(di.return_value)}</td>
@@ -834,18 +872,25 @@ function DealDetail({ dealId, onBack }) {
 
         {/* Collections */}
         {tab==='collections' && <div>
-          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-            <span style={{fontSize:13,color:'var(--text2)'}}>محصّل: <strong style={{color:'var(--green)'}}>{fmt(totalCollected)}</strong> — متبقي: <strong style={{color:'var(--red)'}}>{fmt(remaining)}</strong></span>
+          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+            <div>
+              <span style={{fontSize:13,color:'var(--text2)'}}>محصّل: <strong style={{color:'var(--green)'}}>{fmt(totalCollected)}</strong> — متبقي: <strong style={{color:'var(--red)'}}>{fmt(remaining)}</strong></span>
+              <div style={{fontSize:11,color:'var(--text3)',marginTop:3}}>
+                مقدَّم: {fmt(collections.filter(c=>c.collection_type==='advance').reduce((a,c)=>a+Number(c.amount||0),0))}
+                {' · '}نهائي: {fmt(collections.filter(c=>(c.collection_type||'final')==='final').reduce((a,c)=>a+Number(c.amount||0),0))}
+              </div>
+            </div>
             {!isLocked && <button className="topbar-btn btn-primary" onClick={()=>setColModal(true)}><Icon d={Icons.plus}/> تسجيل تحصيل</button>}
           </div>
           {collections.length===0
             ? <Empty icon="💵" title="لا توجد تحصيلات"/>
             : <table className="table">
-                <thead><tr><th>التاريخ</th><th>المبلغ</th><th>طريقة الدفع</th><th>ملاحظات</th></tr></thead>
+                <thead><tr><th>التاريخ</th><th>المبلغ</th><th>النوع</th><th>طريقة الدفع</th><th>ملاحظات</th></tr></thead>
                 <tbody>{(collections||[]).map(c=>(
                   <tr key={c.id}>
                     <td>{c.collection_date}</td>
                     <td style={{color:'var(--green)',fontWeight:600}}>{fmt(c.amount)}</td>
+                    <td><span className={`badge ${c.collection_type==='advance'?'badge-amber':'badge-green'}`}>{c.collection_type==='advance'?'مقدَّم':'نهائي'}</span></td>
                     <td><span className="badge badge-blue">{payMethods[c.payment_method]||c.payment_method}</span></td>
                     <td style={{color:'var(--text2)'}}>{c.notes||'—'}</td>
                   </tr>
@@ -997,24 +1042,76 @@ function DealDetail({ dealId, onBack }) {
             <div className="form-group"><label className="form-label">اسم العملية</label>
               <input className="form-input" value={editForm.name||''} onChange={e=>setEditForm({...editForm,name:e.target.value})}/>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
-              <div className="form-group"><label className="form-label">سعر التوريد</label>
-                <input className="form-input" type="number" value={editForm.value||''} onChange={e=>setEditForm({...editForm,value:e.target.value})}/>
+
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+              <div className="form-group">
+                <label className="form-label">رقم العملية</label>
+                <input className="form-input" value={editForm.deal_number||''} onChange={e=>setEditForm({...editForm,deal_number:e.target.value})}/>
               </div>
               <div className="form-group">
-                <label className="form-label">التكلفة الفعلية للشراء</label>
-                <input className="form-input" type="number" value={editForm.actual_cost||''} onChange={e=>setEditForm({...editForm,actual_cost:e.target.value})} placeholder="0"/>
-                <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>المبلغ الحقيقي المدفوع — يُحسب منه الربح الفعلي</div>
-              </div>
-              <div className="form-group">
-                <label className="form-label">قيمة الفاتورة الضريبية</label>
-                <input className="form-input" type="number" value={editForm.taxable_cost||''} onChange={e=>setEditForm({...editForm,taxable_cost:e.target.value})} placeholder="0"/>
-                <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>مرجع ضريبي فقط — لا يحرك البنك، يُحسب منه الربح الضريبي</div>
+                <label className="form-label">نوع العملية</label>
+                <select className="form-select" value={editForm.deal_type||'supply'} onChange={e=>setEditForm({...editForm,deal_type:e.target.value})}>
+                  <option value="supply">توريد</option>
+                  <option value="finance">تمويل</option>
+                </select>
               </div>
             </div>
+
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+              <div className="form-group">
+                <label className="form-label">العميل</label>
+                <select className="form-select" value={editForm.client_id||''} onChange={e=>setEditForm({...editForm,client_id:e.target.value})}>
+                  <option value="">بدون عميل</option>
+                  {clientParties.map(c=><option key={c.role_record_id||c.id} value={c.role_record_id||c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">الكيان المنفذ</label>
+                {dealInvestors.length === 0 ? (
+                  <select className="form-select" value={editForm.entity_id||''} onChange={e=>setEditForm({...editForm,entity_id:e.target.value})}>
+                    <option value="">اختر الكيان</option>
+                    {entities.map(en=><option key={en.role_record_id||en.id} value={en.role_record_id||en.id}>{en.name}</option>)}
+                  </select>
+                ) : (
+                  <div className="form-input" style={{background:'var(--bg3)',color:'var(--text2)',cursor:'not-allowed',display:'flex',alignItems:'center'}}>
+                    {deal.entities?.name || '—'}
+                    <span style={{fontSize:11,marginRight:'auto',color:'var(--text3)'}}>مقفول — تم تخصيص ممول واحد على الأقل</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {deal.deal_type==='supply' && <>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
+                <div className="form-group"><label className="form-label">سعر التوريد</label>
+                  <input className="form-input" type="number" value={editForm.value||''} onChange={e=>setEditForm({...editForm,value:e.target.value})}/>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">التكلفة الفعلية للشراء</label>
+                  <input className="form-input" type="number" value={editForm.actual_cost||''} onChange={e=>setEditForm({...editForm,actual_cost:e.target.value})} placeholder="0"/>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>المبلغ الحقيقي المدفوع — يُحسب منه الربح الفعلي</div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">قيمة الفاتورة الضريبية</label>
+                  <input className="form-input" type="number" value={editForm.taxable_cost||''} onChange={e=>setEditForm({...editForm,taxable_cost:e.target.value})} placeholder="0"/>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>مرجع ضريبي فقط — لا يحرك البنك، يُحسب منه الربح الضريبي</div>
+                </div>
+              </div>
+              <div className="form-group"><label className="form-label">سعر الشراء</label>
+                <input className="form-input" type="number" value={editForm.supply_price||''} onChange={e=>setEditForm({...editForm,supply_price:e.target.value})} placeholder="0"/>
+              </div>
+            </>}
+
+            {deal.deal_type==='finance' && (
+              <div className="form-group"><label className="form-label">قيمة التمويل</label>
+                <input className="form-input" type="number" value={editForm.value||''} onChange={e=>setEditForm({...editForm,value:e.target.value})}/>
+              </div>
+            )}
+
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
               <div className="form-group"><label className="form-label">التمويل المطلوب</label>
                 <input className="form-input" type="number" value={editForm.funding_required||''} onChange={e=>setEditForm({...editForm,funding_required:e.target.value})} placeholder="0"/>
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>يُحدَّد يدويًا دائمًا — قد يقل عن قيمة العملية لو فيه تمويل ذاتي أو دفعة مقدَّمة</div>
               </div>
               <div className="form-group">
                 <label className="form-label">التمويل المُوفَّر</label>
@@ -1025,7 +1122,8 @@ function DealDetail({ dealId, onBack }) {
                 </div>
               </div>
             </div>
-            <div style={{background:'var(--bg3)',borderRadius:8,padding:'12px 14px',marginBottom:12}}>
+
+            {deal.deal_type==='supply' && <div style={{background:'var(--bg3)',borderRadius:8,padding:'12px 14px',marginBottom:12}}>
               <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:14,marginBottom:10}}>
                 <input type="checkbox" checked={editForm.tax_applicable||false} onChange={e=>setEditForm({...editForm,tax_applicable:e.target.checked})} style={{width:16,height:16}}/>
                 العملية خاضعة للضريبة
@@ -1058,7 +1156,8 @@ function DealDetail({ dealId, onBack }) {
                   <input className="form-input" type="number" value={editForm.taxable_profit||''} onChange={e=>setEditForm({...editForm,taxable_profit:e.target.value})}/>
                 </div>}
               </>}
-            </div>
+            </div>}
+
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
               <div className="form-group"><label className="form-label">تاريخ الاستحقاق</label>
                 <input className="form-input" type="date" value={editForm.due_date||''} onChange={e=>setEditForm({...editForm,due_date:e.target.value})}/>
@@ -1220,6 +1319,18 @@ function DealDetail({ dealId, onBack }) {
             <div className="form-group"><label className="form-label">{invForm.return_type==='fixed_amount'?'المبلغ (ج.م)':'النسبة %'}</label>
               <input className="form-input" type="number" value={invForm.return_value} onChange={e=>setInvForm({...invForm,return_value:e.target.value})} placeholder="0"/>
             </div>
+            {['fixed_amount','capital_percentage','profit_percentage'].includes(invForm.return_type) && invForm.amount && invForm.return_value && (
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 12px',fontSize:12,color:'var(--text2)',marginBottom:12}}>
+                العائد المتوقَّع: <strong style={{color:'var(--green)'}}>
+                  {fmt(invForm.return_type==='fixed_amount'
+                    ? Number(invForm.return_value)||0
+                    : (Number(invForm.amount)||0) * (Number(invForm.return_value)||0) / 100)}
+                </strong>
+              </div>
+            )}
+            <div className="form-group"><label className="form-label">تاريخ الاستحقاق المتوقَّع <span style={{color:'var(--text3)',fontWeight:400}}>(اختياري — للتوثيق فقط)</span></label>
+              <input className="form-input" type="date" value={invForm.expected_settlement_date} onChange={e=>setInvForm({...invForm,expected_settlement_date:e.target.value})}/>
+            </div>
           </div>
           <div className="modal-footer">
             <button className="topbar-btn btn-ghost" onClick={()=>setInvModal(false)}>إلغاء</button>
@@ -1241,6 +1352,12 @@ function DealDetail({ dealId, onBack }) {
             </div>}
             <div className="form-group"><label className="form-label">التاريخ</label>
               <input className="form-input" type="date" value={colForm.collection_date} onChange={e=>setColForm({...colForm,collection_date:e.target.value})}/>
+            </div>
+            <div className="form-group"><label className="form-label">نوع التحصيل</label>
+              <select className="form-select" value={colForm.collection_type} onChange={e=>setColForm({...colForm,collection_type:e.target.value})}>
+                <option value="final">نهائي (بعد التنفيذ)</option>
+                <option value="advance">دفعة مقدَّمة (قبل التنفيذ)</option>
+              </select>
             </div>
             <div className="form-group"><label className="form-label">طريقة الدفع</label>
               <select className="form-select" value={colForm.payment_method} onChange={e=>setColForm({...colForm,payment_method:e.target.value})}>
@@ -1403,7 +1520,30 @@ function DealDetail({ dealId, onBack }) {
             <div style={{background:'rgba(239,68,68,.08)',border:'1px solid rgba(239,68,68,.2)',borderRadius:8,padding:'12px 14px',fontSize:13,marginBottom:12}}>
               بعد القفل لن يمكن إضافة تحصيلات أو مصروفات أو توزيع أرباح جديد إلا بعد إعادة الفتح مع تسجيل السبب.
             </div>
-            <div style={{fontSize:14}}>إجمالي الموزَّع: <strong style={{color:'var(--green)'}}>{fmt(totalDistributed)}</strong></div>
+
+            {/* تحذير: تحصيل غير مكتمل — إعلامي فقط، لا يمنع القفل */}
+            {remaining > 0.01 && (
+              <div style={{background:'rgba(245,158,11,.1)',border:'1px solid rgba(245,158,11,.3)',borderRadius:8,padding:'10px 14px',fontSize:13,marginBottom:10,display:'flex',alignItems:'flex-start',gap:8}}>
+                <span>⚠️</span>
+                <div>
+                  <strong>التحصيل غير مكتمل</strong>
+                  <div style={{color:'var(--text2)',marginTop:2}}>المبلغ المتبقي غير المُحصَّل: <strong style={{color:'var(--amber)'}}>{fmt(remaining)}</strong></div>
+                </div>
+              </div>
+            )}
+
+            {/* تحذير: أرباح غير موزعة — إعلامي فقط، لا يمنع القفل */}
+            {undistributed > 0.01 && (
+              <div style={{background:'rgba(245,158,11,.1)',border:'1px solid rgba(245,158,11,.3)',borderRadius:8,padding:'10px 14px',fontSize:13,marginBottom:10,display:'flex',alignItems:'flex-start',gap:8}}>
+                <span>⚠️</span>
+                <div>
+                  <strong>يوجد أرباح غير موزعة</strong>
+                  <div style={{color:'var(--text2)',marginTop:2}}>المبلغ غير المُوزَّع: <strong style={{color:'var(--amber)'}}>{fmt(undistributed)}</strong></div>
+                </div>
+              </div>
+            )}
+
+            <div style={{fontSize:14,marginTop:8}}>إجمالي الموزَّع: <strong style={{color:'var(--green)'}}>{fmt(totalDistributed)}</strong></div>
           </div>
           <div className="modal-footer">
             <button className="topbar-btn btn-ghost" onClick={()=>setLockModal(false)}>إلغاء</button>

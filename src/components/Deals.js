@@ -11,7 +11,13 @@ function Deals({ navigateSub, navigateBack, subId }) {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 25;
-  const emptyForm = { deal_number:'', name:'', entity_id:'', client_id:'', deal_type:'supply', value:'', cost:'', supply_price:'', status:'studying', tax_applicable:false, tax_expected:'', investor_ids:[], broker_id:'', notes:'' };
+  const emptyForm = {
+    deal_number:'', name:'', entity_id:'', client_id:'', deal_type:'supply', value:'',
+    cost:'', supply_price:'', taxable_cost:'',
+    tax_applicable:false, vat_amount:'', withholding_amount:'', income_tax_amount:'',
+    funding_required:'', due_date:'', expected_collection_date:'', expected_end_date:'',
+    broker_id:'', notes:'',
+  };
   const [form, setForm] = useState(emptyForm);
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
@@ -39,49 +45,59 @@ function Deals({ navigateSub, navigateBack, subId }) {
     if (!form.name.trim()) e.name = true;
     if (!form.entity_id) e.entity_id = true;
     if (!form.value) e.value = true;
+    // العميل إجباري لعمليات التوريد (لازم يستلم التوريد)، اختياري لعمليات التمويل
+    if (form.deal_type === 'supply' && !form.client_id) e.client_id = true;
     setErrors(e);
     return Object.keys(e).length === 0;
   };
 
-  const toggleInvestor = (id) => {
-    setForm(f => ({
-      ...f,
-      investor_ids: f.investor_ids.includes(id)
-        ? f.investor_ids.filter(x=>x!==id)
-        : [...f.investor_ids, id]
-    }));
-  };
-
   const save = async () => {
     if (!validate()) return;
+    if (saving) return;
     setSaving(true);
-    const expected = form.value && form.cost ? Number(form.value)-Number(form.cost) : 0;
-    const { data: inserted, error } = await sb.from('deals').insert([{
-      deal_number: form.deal_number.trim(), name: form.name.trim(),
-      entity_id: form.entity_id||null, client_id: form.client_id||null,
-      deal_type: form.deal_type, value: Number(form.value)||0,
-      cost: Number(form.cost)||0, supply_price: Number(form.supply_price)||0,
-      expected_profit: expected, status: form.status,
-      tax_applicable: form.tax_applicable,
-      tax_expected: form.tax_applicable ? Number(form.tax_expected)||0 : 0,
-      notes: form.notes,
-    }]).select().single();
+    try {
+      const isSupply = form.deal_type === 'supply';
+      const cost = isSupply ? Number(form.cost)||0 : 0;
+      const expected = form.value && cost ? Number(form.value)-cost : 0;
+      const vat   = isSupply && form.tax_applicable ? Number(form.vat_amount)||0 : 0;
+      const wh    = isSupply && form.tax_applicable ? Number(form.withholding_amount)||0 : 0;
+      const inc   = isSupply && form.tax_applicable ? Number(form.income_tax_amount)||0 : 0;
 
-    if (!error && inserted) {
-      // H-02 FIX: deal_investors insert with amount:0 removed.
-      // Inserting with amount=0 bypasses allocate_investor_to_deal_atomic,
-      // leaves funding_provided unchanged, and creates phantom deal_investor rows
-      // with no financial record. Capital allocation is done from DealDetail
-      // via allocate_investor_to_deal_atomic after the deal is created.
-      // investor_ids selection in this form is UI-only (for future reference display).
+      const { data: inserted, error } = await sb.from('deals').insert([{
+        deal_number: form.deal_number.trim(), name: form.name.trim(),
+        entity_id: form.entity_id||null, client_id: form.client_id||null,
+        deal_type: form.deal_type, value: Number(form.value)||0,
+        // العملية الجديدة تبدأ دائمًا بحالة "تحت الدراسة" — أي حالة أخرى
+        // (نشطة/مغلقة/ملغاة...) تمر إلزاميًا عبر الـ RPCs المخصصة لاحقًا
+        status: 'studying',
+        // حقول التوريد/التكلفة/الضرائب غير منطقية لعمليات التمويل — تُرسَل صفر
+        cost, supply_price: isSupply ? Number(form.supply_price)||0 : 0,
+        taxable_cost: isSupply ? Number(form.taxable_cost)||0 : 0,
+        expected_profit: expected,
+        tax_applicable: isSupply ? form.tax_applicable : false,
+        vat_amount: vat, withholding_amount: wh, income_tax_amount: inc,
+        tax_expected: vat + wh + inc, // مجموع تلقائي للتوافق الخلفي
+        funding_required: Number(form.funding_required)||0,
+        due_date: form.due_date||null,
+        expected_collection_date: form.expected_collection_date||null,
+        expected_end_date: form.expected_end_date||null,
+        notes: form.notes,
+      }]).select().single();
 
-      // ربط الوسيط فقط — لا تأثير مالي
-      if (form.broker_id) {
+      if (error) throw error;
+
+      // ربط الوسيط فقط — لا تأثير مالي، تخصيص رأس المال الفعلي يتم من DealDetail
+      if (form.broker_id && inserted) {
         await sb.from('deal_brokers').insert([{ deal_id: inserted.id, broker_id: form.broker_id, commission_type: 'fixed_amount', commission_value: 0 }]);
       }
+
+      setModal(false); setForm(emptyForm); setErrors({});
+      await load();
+    } catch(err) {
+      showError(err, 'إضافة عملية');
+    } finally {
+      setSaving(false);
     }
-    setModal(false); setForm(emptyForm); setErrors({});
-    await load(); setSaving(false);
   };
 
   const inputStyle = (field) => ({ ...(errors[field] ? { borderColor:'var(--red)' } : {}) });
@@ -205,65 +221,103 @@ function Deals({ navigateSub, navigateBack, subId }) {
                 {errMsg('entity_id')}
               </div>
               <div className="form-group">
-                <label className="form-label">العميل</label>
-                <select className="form-select" value={form.client_id} onChange={e=>setForm({...form,client_id:e.target.value})}>
-                  <option value="">اختر العميل (اختياري)</option>
+                <label className="form-label">العميل{form.deal_type==='supply' && <span style={{color:'var(--red)'}}> *</span>}</label>
+                <select className="form-select" style={inputStyle('client_id')} value={form.client_id} onChange={e=>{setForm({...form,client_id:e.target.value});setErrors({...errors,client_id:false});}}>
+                  <option value="">{form.deal_type==='supply' ? 'اختر العميل' : 'اختر العميل (اختياري)'}</option>
                   {clients.map(c=><option key={c.role_record_id||c.id} value={c.role_record_id||c.id}>{c.name}</option>)}
                 </select>
+                {errMsg('client_id')}
               </div>
             </div>
 
-            {/* الأسعار */}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
-              <div className="form-group">
-                <label className="form-label">سعر التوريد <span style={{color:'var(--red)'}}>*</span></label>
-                <input className="form-input" style={inputStyle('value')} type="number" value={form.value} onChange={e=>{setForm({...form,value:e.target.value});setErrors({...errors,value:false});}} placeholder="0"/>
-                {errMsg('value')}
-              </div>
-              <div className="form-group">
-                <label className="form-label">تكلفة التنفيذ</label>
-                <input className="form-input" type="number" value={form.cost} onChange={e=>setForm({...form,cost:e.target.value})} placeholder="0"/>
+            {/* الأسعار — تظهر فقط لعمليات التوريد */}
+            {form.deal_type==='supply' && <>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
+                <div className="form-group">
+                  <label className="form-label">سعر التوريد <span style={{color:'var(--red)'}}>*</span></label>
+                  <input className="form-input" style={inputStyle('value')} type="number" value={form.value} onChange={e=>{setForm({...form,value:e.target.value});setErrors({...errors,value:false});}} placeholder="0"/>
+                  {errMsg('value')}
+                </div>
+                <div className="form-group">
+                  <label className="form-label">التكلفة الفعلية للشراء</label>
+                  <input className="form-input" type="number" value={form.cost} onChange={e=>setForm({...form,cost:e.target.value})} placeholder="0"/>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>المبلغ الحقيقي المدفوع — يُحسب منه الربح الفعلي</div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">قيمة الفاتورة الضريبية</label>
+                  <input className="form-input" type="number" value={form.taxable_cost} onChange={e=>setForm({...form,taxable_cost:e.target.value})} placeholder="0"/>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>مرجع ضريبي فقط — لا يؤثر على الربح الفعلي</div>
+                </div>
               </div>
               <div className="form-group">
                 <label className="form-label">سعر الشراء</label>
                 <input className="form-input" type="number" value={form.supply_price} onChange={e=>setForm({...form,supply_price:e.target.value})} placeholder="0"/>
               </div>
-            </div>
+            </>}
 
-            {/* ملخص الربح */}
-            {form.value && form.cost && <div style={{background:'rgba(16,185,129,.08)',border:'1px solid rgba(16,185,129,.2)',borderRadius:8,padding:'10px 14px',fontSize:13,color:'var(--green)',marginBottom:12,display:'flex',justifyContent:'space-between'}}>
+            {/* عملية التمويل: سعر التوريد فقط بدون حقول شراء/ضرائب */}
+            {form.deal_type==='finance' && (
+              <div className="form-group">
+                <label className="form-label">قيمة التمويل <span style={{color:'var(--red)'}}>*</span></label>
+                <input className="form-input" style={inputStyle('value')} type="number" value={form.value} onChange={e=>{setForm({...form,value:e.target.value});setErrors({...errors,value:false});}} placeholder="0"/>
+                {errMsg('value')}
+              </div>
+            )}
+
+            {/* ملخص الربح — للتوريد فقط */}
+            {form.deal_type==='supply' && form.value && form.cost && <div style={{background:'rgba(16,185,129,.08)',border:'1px solid rgba(16,185,129,.2)',borderRadius:8,padding:'10px 14px',fontSize:13,color:'var(--green)',marginBottom:12,display:'flex',justifyContent:'space-between'}}>
               <span>الربح المتوقع</span>
               <strong>{fmt(Number(form.value)-Number(form.cost))}</strong>
             </div>}
 
-            {/* الضريبة */}
-            <div style={{background:'var(--bg3)',borderRadius:8,padding:'12px 14px',marginBottom:12}}>
-              <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:14,fontWeight:500}}>
+            {/* التمويل المطلوب */}
+            <div className="form-group">
+              <label className="form-label">التمويل المطلوب من الممولين</label>
+              <input className="form-input" type="number" value={form.funding_required} onChange={e=>setForm({...form,funding_required:e.target.value})} placeholder="0"/>
+              <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>قد يقل عن قيمة العملية لو فيه تمويل ذاتي أو دفعة مقدَّمة من العميل — يُحدَّد يدويًا دائمًا</div>
+            </div>
+
+            {/* التواريخ المتوقعة */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
+              <div className="form-group">
+                <label className="form-label">تاريخ الاستحقاق</label>
+                <input className="form-input" type="date" value={form.due_date} onChange={e=>setForm({...form,due_date:e.target.value})}/>
+              </div>
+              <div className="form-group">
+                <label className="form-label">التحصيل المتوقع</label>
+                <input className="form-input" type="date" value={form.expected_collection_date} onChange={e=>setForm({...form,expected_collection_date:e.target.value})}/>
+              </div>
+              <div className="form-group">
+                <label className="form-label">الانتهاء المتوقع</label>
+                <input className="form-input" type="date" value={form.expected_end_date} onChange={e=>setForm({...form,expected_end_date:e.target.value})}/>
+              </div>
+            </div>
+
+            {/* الضريبة — 3 أنواع منفصلة، لعمليات التوريد فقط */}
+            {form.deal_type==='supply' && <div style={{background:'var(--bg3)',borderRadius:8,padding:'12px 14px',marginBottom:12}}>
+              <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:14,fontWeight:500,marginBottom:10}}>
                 <input type="checkbox" checked={form.tax_applicable} onChange={e=>setForm({...form,tax_applicable:e.target.checked})} style={{width:16,height:16,cursor:'pointer'}}/>
                 العملية خاضعة للضريبة
               </label>
-              {form.tax_applicable && <div style={{marginTop:10}}>
-                <label className="form-label">قيمة الضريبة المتوقعة (ج.م)</label>
-                <input className="form-input" type="number" value={form.tax_expected} onChange={e=>setForm({...form,tax_expected:e.target.value})} placeholder="0"/>
-              </div>}
-            </div>
-
-            {/* الممولون */}
-            {investors.length > 0 && <div style={{marginBottom:12}}>
-              <label className="form-label">الممولون المتوقعون (للإشارة فقط — التخصيص المالي يتم من صفحة تفاصيل العملية)</label>
-              <div style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:6}}>
-                {(investors||[]).map(inv=>(
-                  <button key={inv.role_record_id||inv.id} type="button"
-                    onClick={()=>toggleInvestor(inv.role_record_id||inv.id)}
-                    style={{padding:'6px 14px',borderRadius:20,border:'1px solid',fontSize:13,cursor:'pointer',fontFamily:'Cairo,sans-serif',
-                      background: form.investor_ids.includes(inv.role_record_id||inv.id) ? 'rgba(61,127,255,.15)' : 'var(--bg3)',
-                      borderColor: form.investor_ids.includes(inv.role_record_id||inv.id) ? 'var(--accent)' : 'var(--border)',
-                      color: form.investor_ids.includes(inv.role_record_id||inv.id) ? 'var(--accent)' : 'var(--text2)',
-                    }}>
-                    {form.investor_ids.includes(inv.role_record_id||inv.id) ? '✓ ' : ''}{inv.name}
-                  </button>
-                ))}
-              </div>
+              {form.tax_applicable && <>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:8}}>
+                  <div className="form-group">
+                    <label className="form-label">ضريبة القيمة المضافة (VAT)</label>
+                    <input className="form-input" type="number" value={form.vat_amount} onChange={e=>setForm({...form,vat_amount:e.target.value})} placeholder="0"/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">خصم تحت حساب الضريبة</label>
+                    <input className="form-input" type="number" value={form.withholding_amount} onChange={e=>setForm({...form,withholding_amount:e.target.value})} placeholder="0"/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">ضريبة الدخل</label>
+                    <input className="form-input" type="number" value={form.income_tax_amount} onChange={e=>setForm({...form,income_tax_amount:e.target.value})} placeholder="0"/>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:'var(--text2)'}}>
+                  إجمالي الضرائب المتوقعة: <strong>{fmt((Number(form.vat_amount)||0)+(Number(form.withholding_amount)||0)+(Number(form.income_tax_amount)||0))}</strong>
+                </div>
+              </>}
             </div>}
 
             {/* الوسيط */}
@@ -275,18 +329,10 @@ function Deals({ navigateSub, navigateBack, subId }) {
               </select>
             </div>
 
-            {/* الحالة والملاحظات */}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
-              <div className="form-group">
-                <label className="form-label">الحالة</label>
-                <select className="form-select" value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>
-                  {Object.entries(STATUS_MAP).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label">ملاحظات</label>
-                <input className="form-input" value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="اختياري"/>
-              </div>
+            {/* ملاحظات */}
+            <div className="form-group">
+              <label className="form-label">ملاحظات</label>
+              <input className="form-input" value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="اختياري"/>
             </div>
 
           </div>
