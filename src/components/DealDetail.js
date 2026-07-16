@@ -5,6 +5,7 @@ function DealDetail({ dealId, onBack }) {
   const [clientParties, setClientParties] = useState([]);
   const [brokerParties, setBrokerParties] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [entityTaxSummary, setEntityTaxSummary] = useState(null);
   const [dealInvestors, setDealInvestors] = useState([]);
   const [collections, setCollections] = useState([]);
   const [supplyOrders, setSupplyOrders] = useState([]);
@@ -104,7 +105,7 @@ function DealDetail({ dealId, onBack }) {
   // يستخدم payee_type='party' في record_payment_atomic — أي party
   // في النظام يمكنه استقبال تحويل بدون الحاجة لجدول suppliers مستقل
   const [partyTransferForm, setPartyTransferForm] = useState({
-    party_id:'', party_name:'', amount:'', account_id:'', notes:'', _nonce: makeNonce(),
+    party_id:'', party_name:'', amount:'', account_id:'', notes:'', transfer_type:'general', _nonce: makeNonce(),
   });
   const [partySearchQ, setPartySearchQ] = useState('');
   const [partySearchResults, setPartySearchResults] = useState([]);
@@ -129,7 +130,9 @@ function DealDetail({ dealId, onBack }) {
       await callRpc('record_payment_atomic', {
         p_payee_type:      'party',
         p_payee_id:         partyTransferForm.party_id,
-        p_payment_type:     'transfer_to_party',
+        // تصنيف صريح: تحويل ضريبة دخل متوقعة يُميَّز عن أي تحويل عام آخر
+        // لأنه هو المصدر الوحيد الذي يُحتسب في عداد v_entity_income_tax_summary
+        p_payment_type:     partyTransferForm.transfer_type === 'income_tax' ? 'income_tax_advance' : 'transfer_to_party',
         p_amount:           amt,
         p_payment_date:     todayStr(),
         p_account_id:       partyTransferForm.account_id,
@@ -137,9 +140,15 @@ function DealDetail({ dealId, onBack }) {
         p_notes:            partyTransferForm.notes || null,
         p_idempotency_key:  makeStableKey('party_transfer', dealId, partyTransferForm._nonce),
       });
-      await addTimeline('party_transfer', `تحويل إلى: ${partyTransferForm.party_name}`, partyTransferForm.notes, amt);
+      await addTimeline(
+        partyTransferForm.transfer_type === 'income_tax' ? 'income_tax_transfer' : 'party_transfer',
+        partyTransferForm.transfer_type === 'income_tax'
+          ? `تحويل ضريبة دخل متوقعة إلى: ${partyTransferForm.party_name}`
+          : `تحويل إلى: ${partyTransferForm.party_name}`,
+        partyTransferForm.notes, amt
+      );
       setPartyTransferModal(false);
-      setPartyTransferForm({ party_id:'', party_name:'', amount:'', account_id:'', notes:'', _nonce: makeNonce() });
+      setPartyTransferForm({ party_id:'', party_name:'', amount:'', account_id:'', notes:'', transfer_type:'general', _nonce: makeNonce() });
       setPartySearchQ(''); setPartySearchResults([]);
       await load();
     } catch(err) { showError(err, 'تحويل لطرف'); }
@@ -175,7 +184,7 @@ function DealDetail({ dealId, onBack }) {
       // instead of throwing on failure. Financial calculations MUST check hasError
       // before using data. If any critical query fails we surface a banner and
       // block sensitive actions.
-      const [rDi, rCol, rSO, rExp, rInv, rDb, rDist, rTl, rEnt, rAcc, rPP, rCli, rBrk] = await Promise.all([
+      const [rDi, rCol, rSO, rExp, rInv, rDb, rDist, rTl, rEnt, rAcc, rPP, rCli, rBrk, rTaxSum] = await Promise.all([
         safeQuery(sb.from('deal_investors').select('*, investors(name)').eq('deal_id', dealId), 'deal_investors'),
         safeQuery(sb.from('collections').select('*').eq('deal_id', dealId).order('collection_date'), 'collections'),
         safeQuery(sb.from('v_supply_orders_with_cheques').select('*').eq('deal_id', dealId).order('order_date',{ascending:false}), 'supply_orders'),
@@ -189,6 +198,11 @@ function DealDetail({ dealId, onBack }) {
         safeQuery(sb.from('deal_profit_periods').select('*').eq('deal_id', dealId).order('period_number'), 'profit_periods'),
         safeQuery(fetchPartiesByRole('client'), 'clients'),
         safeQuery(fetchPartiesByRole('broker'), 'brokers'),
+        d.entity_id
+          ? sb.from('v_entity_income_tax_summary').select('*').eq('entity_id', d.entity_id).maybeSingle()
+              .then(({data}) => ({ data, hasError: false, label: 'entity_tax_summary' }))
+              .catch(() => ({ data: null, hasError: true, label: 'entity_tax_summary' }))
+          : Promise.resolve({ data: null, hasError: false, label: 'entity_tax_summary' }),
       ]);
 
       // Identify which critical queries failed — these affect financial calculations
@@ -210,6 +224,7 @@ function DealDetail({ dealId, onBack }) {
       setAccounts(rAcc.data);
       setClientParties(rCli?.data || []);
       setBrokerParties(rBrk?.data || []);
+      setEntityTaxSummary(rTaxSum?.data || null);
       // Store which critical queries failed so the UI can warn the user
       setDataWarnings(criticalErrors);
       setNewStatus(d.status || 'studying');
@@ -228,6 +243,7 @@ function DealDetail({ dealId, onBack }) {
         vat_amount: d.vat_amount || 0,
         withholding_amount: d.withholding_amount || 0,
         income_tax_amount: d.income_tax_amount || 0,
+        income_tax_manual: d.income_tax_manual || false,
         taxable_profit: d.taxable_profit || 0,
         taxable_profit_manual: d.taxable_profit_manual || false,
         funding_required: d.funding_required || 0,
@@ -415,6 +431,7 @@ function DealDetail({ dealId, onBack }) {
           vat_amount: editForm.tax_applicable ? vat : 0,
           withholding_amount: editForm.tax_applicable ? wh : 0,
           income_tax_amount: editForm.tax_applicable ? inc : 0,
+          income_tax_manual: editForm.tax_applicable ? (editForm.income_tax_manual||false) : false,
           taxable_profit: tp, taxable_profit_manual: editForm.taxable_profit_manual,
         });
       }
@@ -715,7 +732,7 @@ function DealDetail({ dealId, onBack }) {
         </div>
         <StatCard label="المصروفات" valueClass="red" value={fmtShort(totalExpenses)}/>
         <div className="stat-card">
-          <div className="stat-label">صافي الربح الفعلي</div>
+          <div className="stat-label">صافي الربح الفعلي (الحقيقي)</div>
           <div className={`stat-value ${netProfit>=0?'green':'red'}`}>{fmtShort(netProfit)}</div>
         </div>
         {deal.tax_applicable && <div className="stat-card">
@@ -723,12 +740,45 @@ function DealDetail({ dealId, onBack }) {
           <div className="stat-value amber">{fmtShort(taxableProfit)}</div>
           {deal.taxable_profit_manual && <div className="stat-sub">✏️ يدوي</div>}
         </div>}
+        {expectedIncomeTax > 0 && <div className="stat-card">
+          <div className="stat-label">ضريبة الدخل المتوقعة (22.5%)</div>
+          <div className="stat-value amber">{fmtShort(expectedIncomeTax)}</div>
+          {deal.income_tax_manual && <div className="stat-sub">✏️ يدوي</div>}
+        </div>}
+        {expectedIncomeTax > 0 && <div className="stat-card">
+          <div className="stat-label">المتاح للتوزيع</div>
+          <div className={`stat-value ${distributableProfit>=0?'green':'red'}`}>{fmtShort(distributableProfit)}</div>
+          <div className="stat-sub">بعد خصم ضريبة الدخل المتوقعة</div>
+        </div>}
         <div className="stat-card">
           <div className="stat-label">تم توزيعه</div>
           <div className="stat-value blue">{fmtShort(totalDistributed)}</div>
           <div className="stat-sub">غير موزع: {fmt(undistributed)}</div>
         </div>
       </div>
+
+      {/* عداد ضريبة الدخل المتراكمة للكيان — إعلامي، من v_entity_income_tax_summary */}
+      {entityTaxSummary && entityTaxSummary.total_expected_income_tax > 0 && (
+        <div style={{marginBottom:16,background:'rgba(245,158,11,.06)',border:'1px solid rgba(245,158,11,.2)',borderRadius:12,padding:'12px 16px'}}>
+          <div style={{fontSize:12,fontWeight:700,color:'var(--text3)',marginBottom:8,textTransform:'uppercase',letterSpacing:1}}>
+            عداد ضريبة الدخل المتراكم — {deal.entities?.name}
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,fontSize:13}}>
+            <div>
+              <div style={{color:'var(--text3)',fontSize:11}}>إجمالي متوقَّع (كل العمليات)</div>
+              <div style={{fontWeight:700,color:'var(--amber)'}}>{fmt(entityTaxSummary.total_expected_income_tax)}</div>
+            </div>
+            <div>
+              <div style={{color:'var(--text3)',fontSize:11}}>إجمالي مُحوَّل فعليًا</div>
+              <div style={{fontWeight:700,color:'var(--green)'}}>{fmt(entityTaxSummary.total_transferred)}</div>
+            </div>
+            <div>
+              <div style={{color:'var(--text3)',fontSize:11}}>الرصيد المتبقي</div>
+              <div style={{fontWeight:700,color:'var(--red)'}}>{fmt(entityTaxSummary.remaining_balance)}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Collection progress */}
       {deal.value > 0 && <div style={{marginBottom:16,background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:12,padding:'12px 16px'}}>
@@ -924,22 +974,31 @@ function DealDetail({ dealId, onBack }) {
 
         {/* Profit Distribution */}
         {tab==='distributions' && <div>
-          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-            <div style={{fontSize:13}}>
-              <span style={{color:'var(--text2)'}}>صافي الربح: </span><strong style={{color:'var(--green)'}}>{fmt(netProfit)}</strong>
-              <span style={{color:'var(--text3)',margin:'0 8px'}}>|</span>
-              <span style={{color:'var(--text2)'}}>موزَّع: </span><strong style={{color:'var(--blue)'}}>{fmt(totalDistributed)}</strong>
-              <span style={{color:'var(--text3)',margin:'0 8px'}}>|</span>
-              <span style={{color:'var(--text2)'}}>غير موزَّع: </span><strong style={{color:undistributed<0?'var(--red)':'var(--amber)'}}>{fmt(undistributed)}</strong>
+          <div style={{padding:'12px 18px',borderBottom:'1px solid var(--border)'}}>
+            <div style={{fontSize:13,marginBottom:8}}>
+              <span style={{color:'var(--text2)'}}>الربح الحقيقي: </span><strong style={{color:'var(--green)'}}>{fmt(netProfit)}</strong>
+              {expectedIncomeTax > 0 && <>
+                <span style={{color:'var(--text3)',margin:'0 8px'}}>−</span>
+                <span style={{color:'var(--text2)'}}>ضريبة الدخل المتوقعة: </span><strong style={{color:'var(--amber)'}}>{fmt(expectedIncomeTax)}</strong>
+                <span style={{color:'var(--text3)',margin:'0 8px'}}>=</span>
+                <span style={{color:'var(--text2)'}}>المتاح للتوزيع: </span><strong style={{color:'var(--accent)'}}>{fmt(distributableProfit)}</strong>
+              </>}
             </div>
-            {!isLocked && (
-              <button
-                className="topbar-btn btn-primary"
-                style={{opacity: hasDataWarning ? 0.45 : 1, cursor: hasDataWarning ? 'not-allowed' : 'pointer'}}
-                onClick={()=>{ if(hasDataWarning){ alert(dataWarningMsg); return; } setDistModal(true); }}
-                title={hasDataWarning ? dataWarningMsg : 'توزيع أرباح جديد'}
-              ><Icon d={Icons.plus}/> توزيع جديد</button>
-            )}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+              <div style={{fontSize:13}}>
+                <span style={{color:'var(--text2)'}}>موزَّع: </span><strong style={{color:'var(--blue)'}}>{fmt(totalDistributed)}</strong>
+                <span style={{color:'var(--text3)',margin:'0 8px'}}>|</span>
+                <span style={{color:'var(--text2)'}}>غير موزَّع: </span><strong style={{color:undistributed<0?'var(--red)':'var(--amber)'}}>{fmt(undistributed)}</strong>
+              </div>
+              {!isLocked && (
+                <button
+                  className="topbar-btn btn-primary"
+                  style={{opacity: hasDataWarning ? 0.45 : 1, cursor: hasDataWarning ? 'not-allowed' : 'pointer'}}
+                  onClick={()=>{ if(hasDataWarning){ alert(dataWarningMsg); return; } setDistModal(true); }}
+                  title={hasDataWarning ? dataWarningMsg : 'توزيع أرباح جديد'}
+                ><Icon d={Icons.plus}/> توزيع جديد</button>
+              )}
+            </div>
           </div>
           {distributions.length===0
             ? <Empty icon="📊" title="لم يتم توزيع الأرباح بعد"/>
@@ -1093,12 +1152,44 @@ function DealDetail({ dealId, onBack }) {
                 </div>
                 <div className="form-group">
                   <label className="form-label">قيمة الفاتورة الضريبية</label>
-                  <input className="form-input" type="number" value={editForm.taxable_cost||''} onChange={e=>setEditForm({...editForm,taxable_cost:e.target.value})} placeholder="0"/>
-                  <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>مرجع ضريبي فقط — لا يحرك البنك، يُحسب منه الربح الضريبي</div>
+                  <input className="form-input" type="number" value={editForm.taxable_cost||''} onChange={e=>{
+                    const newTaxCost = e.target.value;
+                    setEditForm(prev => {
+                      const next = { ...prev, taxable_cost: newTaxCost };
+                      // إعادة حساب ضريبة الدخل المتوقعة تلقائيًا عند تغيير قيمة الفاتورة الضريبية
+                      // (Supply Value − Taxable Cost) × 22.5% — ما لم يكن الحقل مُدخَلاً يدويًا
+                      if (!prev.income_tax_manual) {
+                        const taxProfit = Number(prev.value||0) - (Number(newTaxCost)||0);
+                        next.income_tax_amount = Math.max(0, taxProfit) * 0.225;
+                      }
+                      return next;
+                    });
+                  }} placeholder="0"/>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>مرجع ضريبي فقط — لا يحرك البنك، يُحسب منه الربح الضريبي وضريبة الدخل المتوقعة تلقائيًا</div>
                 </div>
               </div>
               <div className="form-group"><label className="form-label">سعر الشراء</label>
                 <input className="form-input" type="number" value={editForm.supply_price||''} onChange={e=>setEditForm({...editForm,supply_price:e.target.value})} placeholder="0"/>
+              </div>
+              <div className="form-group" style={{background:'rgba(245,158,11,.06)',border:'1px solid rgba(245,158,11,.2)',borderRadius:8,padding:'10px 14px'}}>
+                <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:13,marginBottom:8}}>
+                  <input type="checkbox" checked={editForm.income_tax_manual||false} onChange={e=>setEditForm({...editForm,income_tax_manual:e.target.checked})} style={{width:14,height:14}}/>
+                  تحديد ضريبة الدخل المتوقعة يدويًا (بدلاً من الحساب التلقائي 22.5%)
+                </label>
+                <label className="form-label">ضريبة الدخل المتوقعة (ج.م)</label>
+                <input
+                  className="form-input" type="number"
+                  value={editForm.income_tax_amount||''}
+                  disabled={!editForm.income_tax_manual}
+                  onChange={e=>setEditForm({...editForm,income_tax_amount:e.target.value})}
+                  style={!editForm.income_tax_manual ? {opacity:0.7,cursor:'not-allowed'} : {}}
+                  placeholder="0"
+                />
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>
+                  {editForm.income_tax_manual
+                    ? 'قيمة مُدخَلة يدويًا — لن يُعاد حسابها تلقائيًا'
+                    : `تلقائي: (${fmt(Number(editForm.value)||0)} − ${fmt(Number(editForm.taxable_cost)||0)}) × 22.5%`}
+                </div>
               </div>
             </>}
 
@@ -1129,9 +1220,8 @@ function DealDetail({ dealId, onBack }) {
                 العملية خاضعة للضريبة
               </label>
               {editForm.tax_applicable && <>
-                {/* Version 1 — ضرائب منفصلة (VAT / Withholding / Income Tax) */}
-                {/* مُصمَّمة كأعمدة في deals الآن — يسهل نقلها لجدول deal_taxes مستقبلاً */}
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:8}}>
+                {/* Version 1 — ضرائب منفصلة (VAT / Withholding) — ضريبة الدخل تُدار في قسم مخصص أعلاه (تلقائي 22.5% + خيار يدوي) */}
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:8}}>
                   <div className="form-group">
                     <label className="form-label">ضريبة القيمة المضافة (VAT)</label>
                     <input className="form-input" type="number" value={editForm.vat_amount||''} onChange={e=>setEditForm({...editForm,vat_amount:e.target.value})} placeholder="0"/>
@@ -1140,13 +1230,9 @@ function DealDetail({ dealId, onBack }) {
                     <label className="form-label">خصم تحت حساب الضريبة</label>
                     <input className="form-input" type="number" value={editForm.withholding_amount||''} onChange={e=>setEditForm({...editForm,withholding_amount:e.target.value})} placeholder="0"/>
                   </div>
-                  <div className="form-group">
-                    <label className="form-label">ضريبة الدخل</label>
-                    <input className="form-input" type="number" value={editForm.income_tax_amount||''} onChange={e=>setEditForm({...editForm,income_tax_amount:e.target.value})} placeholder="0"/>
-                  </div>
                 </div>
                 <div style={{fontSize:11,color:'var(--text2)',marginBottom:8,paddingTop:6,borderTop:'1px solid var(--border)'}}>
-                  إجمالي الضرائب المتوقعة: <strong>{fmt((Number(editForm.vat_amount)||0)+(Number(editForm.withholding_amount)||0)+(Number(editForm.income_tax_amount)||0))}</strong>
+                  إجمالي الضرائب المتوقعة (شامل ضريبة الدخل): <strong>{fmt((Number(editForm.vat_amount)||0)+(Number(editForm.withholding_amount)||0)+(Number(editForm.income_tax_amount)||0))}</strong>
                 </div>
                 <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:13,marginTop:8}}>
                   <input type="checkbox" checked={editForm.taxable_profit_manual||false} onChange={e=>setEditForm({...editForm,taxable_profit_manual:e.target.checked})} style={{width:14,height:14}}/>
@@ -1190,9 +1276,19 @@ function DealDetail({ dealId, onBack }) {
           <div className="modal-body" style={{maxHeight:'70vh',overflowY:'auto'}}>
             <div style={{background:'rgba(16,185,129,.08)',border:'1px solid rgba(16,185,129,.2)',borderRadius:8,padding:'10px 14px',fontSize:13,marginBottom:16}}>
               <div style={{display:'flex',justifyContent:'space-between'}}>
-                <span>صافي الربح المتاح للتوزيع</span>
+                <span>الربح الحقيقي</span>
                 <strong style={{color:'var(--green)'}}>{fmt(netProfit)}</strong>
               </div>
+              {expectedIncomeTax > 0 && <>
+                <div style={{display:'flex',justifyContent:'space-between',marginTop:4}}>
+                  <span>ضريبة الدخل المتوقعة</span>
+                  <strong style={{color:'var(--amber)'}}>− {fmt(expectedIncomeTax)}</strong>
+                </div>
+                <div style={{display:'flex',justifyContent:'space-between',marginTop:4,paddingTop:4,borderTop:'1px dashed rgba(16,185,129,.3)'}}>
+                  <span>المتاح للتوزيع</span>
+                  <strong style={{color:'var(--accent)'}}>{fmt(distributableProfit)}</strong>
+                </div>
+              </>}
               <div style={{display:'flex',justifyContent:'space-between',marginTop:4,color:'var(--text2)'}}>
                 <span>المُوزَّع في هذه الجلسة</span>
                 <span>{fmt(distRows.reduce((a,r)=>a+calcDistAmount(r),0))}</span>
@@ -1454,6 +1550,32 @@ function DealDetail({ dealId, onBack }) {
           <div className="modal-body">
             <div style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>
               استخدم هذا لتحويل أموال لشركة مشتريات أو لوجستيات أو أي طرف لا يملك حساباً تشغيلياً في النظام — لا يؤثر على أرصدة الممولين أو الوسطاء.
+            </div>
+            <div className="form-group">
+              <label className="form-label">نوع التحويل</label>
+              <div style={{display:'flex',gap:8}}>
+                <button type="button"
+                  onClick={()=>setPartyTransferForm({...partyTransferForm,transfer_type:'general'})}
+                  style={{flex:1,padding:'8px 12px',borderRadius:8,border:'1px solid',fontSize:13,cursor:'pointer',fontFamily:'Cairo,sans-serif',
+                    background: partyTransferForm.transfer_type==='general' ? 'var(--accent)' : 'var(--bg3)',
+                    borderColor: partyTransferForm.transfer_type==='general' ? 'var(--accent)' : 'var(--border)',
+                    color: partyTransferForm.transfer_type==='general' ? 'white' : 'var(--text2)'}}>
+                  تحويل عام
+                </button>
+                <button type="button"
+                  onClick={()=>setPartyTransferForm({...partyTransferForm,transfer_type:'income_tax'})}
+                  style={{flex:1,padding:'8px 12px',borderRadius:8,border:'1px solid',fontSize:13,cursor:'pointer',fontFamily:'Cairo,sans-serif',
+                    background: partyTransferForm.transfer_type==='income_tax' ? 'var(--amber)' : 'var(--bg3)',
+                    borderColor: partyTransferForm.transfer_type==='income_tax' ? 'var(--amber)' : 'var(--border)',
+                    color: partyTransferForm.transfer_type==='income_tax' ? '#1a1a1a' : 'var(--text2)'}}>
+                  ضريبة دخل متوقعة
+                </button>
+              </div>
+              {partyTransferForm.transfer_type==='income_tax' && (
+                <div style={{fontSize:11,color:'var(--text3)',marginTop:6}}>
+                  سيُسجَّل هذا التحويل بشكل منفصل عن توزيع الأرباح، ويُحتسب ضمن عداد ضريبة الدخل المتراكم للكيان.
+                </div>
+              )}
             </div>
             <div className="form-group">
               <label className="form-label">البحث عن الطرف</label>
